@@ -1,0 +1,12 @@
+# Default configuration for a PokeAgent battle run.
+# Values here override the AgentConfig defaults; CLI/env can override further.
+[agent]
+model = "claude-sonnet-4-5"
+# compressor_model = "claude-haiku-4-5"   # cheap model for background compression / reviews
+# provider = "anthropic"                  # key into providers registry
+# battle_format = "gen9randombattle"
+# server = "localhost"                    # localhost | showdown
+server_port = 8964                        # port 8000 is taken by another user's service
+# turn_budget = 45.0                     # hard per-turn wall clock (seconds)
+# max_tool_rounds = 6
+# runs_dir = "runs"

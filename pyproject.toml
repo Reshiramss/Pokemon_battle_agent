@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pokeagent"
+version = "0.1.0"
+description = "Open, extensible LLM agent framework for Pokemon battles, built on poke-env"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.111.0",
+    "poke-env @ ../poke-env",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["pokeagent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
