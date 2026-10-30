@@ -17,3 +17,6 @@ runs/
 
 # Local env / secrets
 .env
+
+# Developer-oriented notes (kept local, not published)
+README.dev.md

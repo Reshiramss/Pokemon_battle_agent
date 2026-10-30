@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.111.0",
     "openai>=3.0.0",
-    "poke-env @ ../poke-env",
+    "poke-env>=0.16.1",
 ]
 
 [project.optional-dependencies]
