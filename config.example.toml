@@ -1,0 +1,12 @@
+# Example configuration — copy to config.toml and edit for your setup.
+# config.toml is gitignored, so private endpoints and keys stay local.
+[agent]
+provider = "openai"                            # openai | anthropic
+model = "your-model-name"
+# compressor_model = "your-cheap-model"        # background compression / reviews; defaults to model
+# base_url = "https://api.example.com/v1"      # OpenAI-compatible endpoint; unset -> OPENAI_BASE_URL
+# api_key = "sk-..."                           # unset -> OPENAI_API_KEY env var
+# battle_format = "gen9randombattle"            # preview formats (gen9ou etc.) enable lead choice
+server_port = 8964                             # must match your Showdown server
+# turn_budget = 45.0                            # hard per-turn wall clock (seconds)
+# runs_dir = "runs"

@@ -14,12 +14,12 @@ class AgentConfig:
 
     # --- LLM provider ---
     provider: str = "openai"  # key into the providers registry
-    model: str = "your-model-name"  # main decision model
-    compressor_model: str = "your-model-name"  # cheap model for background compression
+    model: str = "gpt-4o-mini"  # main decision model
+    compressor_model: str = "gpt-4o-mini"  # cheap model for background compression
     # OpenAI-compatible endpoint (vLLM / gateway / api.openai.com). None ->
     # OPENAI_BASE_URL env var, else api.openai.com. Key: None -> OPENAI_API_KEY
     # env var, else "EMPTY" (local vLLM endpoints don't check it).
-    base_url: str | None = "https://api.example.com/v1"  # internal vLLM endpoint
+    base_url: str | None = None
     api_key: str | None = None
     subagent_model: str | None = None  # defaults to compressor_model
     max_tokens_per_call: int = 2000
@@ -28,7 +28,7 @@ class AgentConfig:
     battle_format: str = "gen9randombattle"
     server: str = "localhost"  # "localhost" | "showdown"
     server_host: str = "localhost"
-    server_port: int = 8964  # port 8000 is occupied by another service on this machine
+    server_port: int = 8964  # custom port; avoids colliding with poke-env's default 8000
 
     # --- per-turn budgets (seconds) ---
     turn_budget: float = 45.0  # hard asyncio.wait_for around the whole turn loop

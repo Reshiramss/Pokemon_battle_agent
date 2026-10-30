@@ -17,6 +17,9 @@ runs/
 
 # Local env / secrets
 .env
+# Real config may point at private endpoints — keep only the example tracked
+config.toml
 
 # Developer-oriented notes (kept local, not published)
 README.dev.md
+docs/

@@ -41,7 +41,7 @@ node pokemon-showdown start --no-security --skip-build 8964
 
 ### 2. 配置 LLM
 
-编辑 `config.toml`：
+复制示例配置为 `config.toml` 并编辑（`config.toml` 在 .gitignore 中，私有端点和密钥不会被提交）：
 
 ```toml
 [agent]
@@ -100,7 +100,7 @@ postmortem 每场输出一行，例如：
 
 ## 配置
 
-`config.toml` 中的 `[agent]` 节可覆盖全部默认值，常用项：
+`config.toml`（从 `config.example.toml` 复制）中的 `[agent]` 节可覆盖全部默认值，常用项：
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
@@ -148,5 +148,3 @@ Showdown 服务器 ──▶ PokeAgent（poke-env Player 子类）
 - **新 hook**：继承 `PreDecisionHook` / `PostDecisionHook`（`hooks/base.py`），返回一段知识片段即可。
 - **新子 agent**：继承 `SubAgent`（`tasks/base.py`），`TaskRunner.register()` 后任意位置 fire-and-forget。
 - **新压缩策略**：实现 `ContextCompressor` 协议（`context/compressor.py`）。
-
-详细设计与代码说明见 [docs/architecture.md](docs/architecture.md)。
