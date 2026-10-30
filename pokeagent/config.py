@@ -13,9 +13,14 @@ class AgentConfig:
     """All tunables of the agent framework. Every component reads only this."""
 
     # --- LLM provider ---
-    provider: str = "anthropic"  # key into the providers registry
-    model: str = "claude-sonnet-4-5"  # main decision model
-    compressor_model: str = "claude-haiku-4-5"  # cheap model for background compression
+    provider: str = "openai"  # key into the providers registry
+    model: str = "your-model-name"  # main decision model
+    compressor_model: str = "your-model-name"  # cheap model for background compression
+    # OpenAI-compatible endpoint (vLLM / gateway / api.openai.com). None ->
+    # OPENAI_BASE_URL env var, else api.openai.com. Key: None -> OPENAI_API_KEY
+    # env var, else "EMPTY" (local vLLM endpoints don't check it).
+    base_url: str | None = "https://api.example.com/v1"  # internal vLLM endpoint
+    api_key: str | None = None
     subagent_model: str | None = None  # defaults to compressor_model
     max_tokens_per_call: int = 2000
 
@@ -27,6 +32,7 @@ class AgentConfig:
 
     # --- per-turn budgets (seconds) ---
     turn_budget: float = 45.0  # hard asyncio.wait_for around the whole turn loop
+    preview_budget: float = 20.0  # team-preview lead choice (phase-1 decision)
     hook_budget: float = 5.0
     tool_call_timeout: float = 8.0
     max_tool_rounds: int = 6
@@ -47,6 +53,11 @@ class AgentConfig:
 
     # --- misc ---
     poke_env_log_level: str = "WARNING"
+    # run logs: per-invocation file log under runs/logs/, plus the per-battle
+    # llm.jsonl raw-conversation dump. Both exist so a finished battle can be
+    # debugged offline without re-running anything.
+    log_level: str = "INFO"  # file log level (console stays WARNING)
+    log_llm_conversation: bool = True  # full prompt/response/tool-result dump per turn
 
     # --- paths ---
     runs_dir: Path = field(default_factory=lambda: Path("runs"))

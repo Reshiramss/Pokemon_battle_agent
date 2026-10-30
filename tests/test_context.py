@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 
 from helpers import ScriptedProvider, make_battle, make_kb
 
@@ -10,6 +12,7 @@ from pokeagent.config import AgentConfig
 from pokeagent.context.compressor import LLMCompressor, TruncatingCompressor
 from pokeagent.context.manager import ContextManager
 from pokeagent.context.records import TurnRecord
+from pokeagent.logging_setup import setup_logging
 from pokeagent.providers.base import LLMResponse
 
 
@@ -170,6 +173,55 @@ def test_truncating_compressor_fits_budget():
         assert "oldest decisions omitted" in text
 
     asyncio.run(scenario())
+
+
+def test_run_artifacts_meta_and_llm_trace(tmp_path):
+    """Every run dir persists a config snapshot and an llm.jsonl trace."""
+    cm = make_cm(tmp_path)
+    meta = json.loads((cm.run_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["battle_tag"] == "battle-1"
+    assert meta["config"]["server_port"] == 8964
+    assert meta["model"]
+
+    cm.log_llm("turn_prompt", turn=1, prompt="hello", tools=["damage_calc"])
+    cm.log_llm(
+        "llm_response", turn=1, round=0, text="thinking",
+        tool_calls=[{"id": "1", "name": "submit_decision", "arguments": {}}],
+        stop_reason="tool_use",
+    )
+    entries = [
+        json.loads(line)
+        for line in (cm.run_dir / "llm.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    kinds = [e["type"] for e in entries]
+    assert kinds == ["turn_prompt", "llm_response"]
+    assert entries[0]["prompt"] == "hello"
+    assert entries[1]["tool_calls"][0]["name"] == "submit_decision"
+
+
+def test_setup_logging_writes_file_and_is_idempotent(tmp_path):
+    root = logging.getLogger()
+    before = len(root.handlers)
+    config = AgentConfig(runs_dir=tmp_path / "runs")
+    path = setup_logging(config)
+    logging.getLogger("test_ctx").warning("boom marker")
+    for handler in root.handlers:
+        handler.flush()
+    assert "boom marker" in path.read_text(encoding="utf-8")
+
+    # a second call swaps the file handler instead of stacking another one
+    # (same-second calls reuse the timestamped path; that's fine)
+    setup_logging(config)
+    ours = [h for h in root.handlers if getattr(h, "_pokeagent_log", False)]
+    assert len(ours) == 1
+    logging.getLogger("test_ctx").warning("second marker")
+    for handler in root.handlers:
+        handler.flush()
+    assert "second marker" in path.read_text(encoding="utf-8")
+    # leave the root logger as we found it
+    for handler in ours:
+        root.removeHandler(handler)
+    assert len(root.handlers) == before
 
 
 def test_knowledge_fragment_and_intel_sections(tmp_path):

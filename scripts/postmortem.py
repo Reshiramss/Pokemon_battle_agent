@@ -1,7 +1,7 @@
 """Summarize runs/ directories: turn counts, fallback rate, latency, tokens.
 
 Usage:
-    .venv/bin/python scripts/postmortem.py [runs_dir] [--last N]
+    python scripts/postmortem.py [runs_dir] [--last N]
 
 Reads each run's events.jsonl (the disk truth) and prints per-battle and
 aggregate metrics. No LLM calls.

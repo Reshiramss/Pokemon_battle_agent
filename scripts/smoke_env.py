@@ -3,7 +3,7 @@
 Verifies the environment (poke-env install + local server on port 8964)
 before any framework code runs:
 
-    .venv/bin/python scripts/smoke_env.py [--port 8964]
+    python scripts/smoke_env.py [--port 8964]
 """
 
 import argparse

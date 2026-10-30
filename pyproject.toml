@@ -9,6 +9,7 @@ description = "Open, extensible LLM agent framework for Pokemon battles, built o
 requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.111.0",
+    "openai>=3.0.0",
     "poke-env @ ../poke-env",
 ]
 

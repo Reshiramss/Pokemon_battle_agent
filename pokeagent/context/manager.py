@@ -70,6 +70,8 @@ class ContextManager:
         self.run_dir: Path = config.runs_dir / f"{ts}_{_sanitize_tag(battle_tag)}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._events_path = self.run_dir / "events.jsonl"
+        self._llm_path = self.run_dir / "llm.jsonl"
+        self._write_meta(ts)
         self.log_event(
             "battle_start",
             battle_tag=battle_tag,
@@ -90,6 +92,25 @@ class ContextManager:
 
     # --- persistence ------------------------------------------------------
 
+    def _write_meta(self, ts: str) -> None:
+        """Config snapshot per battle: which model/endpoint/parameters ran here."""
+        try:
+            config_dict = asdict(self.config)
+            if config_dict.get("api_key"):
+                config_dict["api_key"] = "<set>"  # never write secrets to disk
+            meta = {
+                "started": ts,
+                "battle_tag": self.battle_tag,
+                "format": self.config.battle_format,
+                "provider": self.config.provider,
+                "model": self.config.model,
+                "config": config_dict,
+            }
+            with (self.run_dir / "meta.json").open("w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, default=str, indent=2)
+        except Exception:  # meta is a convenience — never block a battle on it
+            pass
+
     def log_event(self, kind: str, **fields) -> None:
         entry = {
             "type": kind,
@@ -98,6 +119,24 @@ class ContextManager:
         }
         with self._events_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+
+    def log_llm(self, kind: str, **fields) -> None:
+        """Append one raw-conversation entry to llm.jsonl (the debugging dump).
+
+        events.jsonl stays the lean, postmortem-friendly stream; everything
+        the model actually saw and said — full prompts, per-round responses,
+        tool results — lands here so any turn can be replayed offline.
+        """
+        entry = {
+            "type": kind,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **fields,
+        }
+        try:
+            with self._llm_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+        except Exception:  # pragma: no cover - disk issues must not kill a turn
+            pass
 
     def record_turn(self, record: TurnRecord) -> None:
         self._seq += 1
@@ -144,7 +183,12 @@ class ContextManager:
                 # appended after the snapshot stays verbatim/compact
                 self.summary = summary
                 self.summary_covered_seq = end_seq
-                self.log_event("compressed", covered_seq=end_seq, chars=len(summary))
+                self.log_event(
+                    "compressed",
+                    covered_seq=end_seq,
+                    chars=len(summary),
+                    summary=summary,
+                )
         except Exception as e:
             self.log_event("compress_error", covered_seq=end_seq,
                            error=f"{type(e).__name__}: {e}")

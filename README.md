@@ -9,7 +9,11 @@
 ```
                     ┌────────────────────────── 关键路径（零子 agent） ──────────────────────────┐
 Showdown 服务器 ───▶ PokeAgent (pokeagent/player.py, poke-env Player 子类)
-  :8964              │  choose_move(battle)
+  :8964              │  阶段1 选宝可梦: teampreview(battle)
+                    │    └─ AgentLoop.run_preview (loop.py)   仅预览格式触发（gen9ou 等）
+                    │         ① hooks.run_pre 注入知识 → ② submit_lead（终端工具）定首发
+                    │         失败/超时 → 回退基类随机首发
+                    │  阶段2 对战决策: choose_move(battle)
                     │    └─ AgentLoop.run_turn (loop.py)
                     │         ① 新对手宝可梦检测 ──fire-and-forget──▶ TaskRunner.submit(NewMonThreatAgent)
                     │         ② hooks.run_pre ── 并行注入知识片段（5s 时间盒）
@@ -28,19 +32,24 @@ Showdown 服务器 ───▶ PokeAgent (pokeagent/player.py, poke-env Player 
 ```
 
 - **Provider / Tool / Hook / SubAgent / Compressor 全部是抽象接口 + 默认实现**，可独立替换扩展
-- 每场对战落盘 `runs/<时间戳>_<battle_tag>/`：`meta.json` + 逐回合 `events.jsonl`（含**逐字 CoT**）
+- **决策循环分两种**：`run_preview`（阶段1，队伍预览选首发，`submit_lead` 终端工具）与 `run_turn`（阶段2，对战内出招，`submit_decision` 终端工具）——同一套工具循环骨架，gen9randombattle 无预览则阶段1 自动休眠
+- 每场对战落盘 `runs/<时间戳>_<battle_tag>/`：`meta.json` 配置快照 + 逐回合 `events.jsonl`（含**逐字 CoT**）+ `llm.jsonl` 完整对话轨迹；进程日志在 `runs/logs/`
 - 所有 LLM 消息走归一化格式（`UserMessage / AssistantMessage / ToolResultMessage`），provider 负责翻译成各家 API 格式
 
 ## 快速开始
 
-### 1. 环境
+### 1. 环境（conda）
+
+本项目用 conda 环境 `pokeagent`（Python 3.13）：
 
 ```bash
-cd pokemon-agent
-# venv 已就绪；重装的话：
-python -m venv .venv
-env -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL .venv/bin/pip install -i https://pypi.org/simple \
-    -e ../poke-env anthropic pytest
+# 已建好；重建的话：
+conda create -n pokeagent python=3.13 -y
+env -u PIP_INDEX_URL -u PIP_EXTRA_INDEX_URL pip install \
+    -i https://pypi.org/simple -e ../poke-env anthropic openai pytest
+
+# 之后的命令都用：
+python   # 代替 python
 ```
 
 （本机 local pip 镜像缺包时用 `-i https://pypi.org/simple`。）
@@ -56,20 +65,30 @@ node pokemon-showdown start --no-security --skip-build 8964
 
 ### 3. 配置 LLM 凭据
 
+默认走 OpenAI 兼容端点（`config.toml` 的 `provider = "openai"`、`base_url` 指向内部 vLLM，本地端点不校验 key，无需导出任何变量）。要改用 Anthropic 时：
+
 ```bash
 export ANTHROPIC_API_KEY=<你的key>
 export ANTHROPIC_BASE_URL=https://<网关地址>   # 可选，接内部网关时用
 ```
 
+并把 `config.toml` 改回 `provider = "anthropic"`。
+
 ### 4. 跑对战 + 看报告
 
 ```bash
-.venv/bin/python scripts/run_battle.py --opponent heuristic --battles 1
+python scripts/run_battle.py --opponent heuristic --battles 1
 #   --opponent random|heuristic （RandomPlayer / SimpleHeuristicsPlayer）
 
-.venv/bin/python scripts/postmortem.py            # 汇总 runs/ 下的所有对战
-.venv/bin/python scripts/postmortem.py --last 3   # 只看最近 3 场
+python scripts/postmortem.py          # 汇总 runs/ 下的所有对战
+python scripts/postmortem.py --last 3 # 只看最近 3 场
 ```
+
+每次运行**自动留下完整调试日志**（见下方"落盘结构"）：
+
+- 进程级日志 `runs/logs/agent-<时间戳>.log`：框架全部 logging（provider 报错、hook 失败、子 agent 异常、未捕获堆栈）都会落盘；run_battle 启动时会打印该文件路径
+- 每场对战 `runs/<时间戳>_<battle_tag>/llm.jsonl`：模型看到的**完整对话逐字复现**——system prompt、每回合组装的 prompt、每轮 LLM 响应、每次工具调用结果（`log_llm_conversation = false` 可关）
+- `meta.json`：该场运行的配置快照（模型/端点/参数，api_key 脱敏）
 
 postmortem 每场输出一行，例如：
 
@@ -79,26 +98,29 @@ postmortem 每场输出一行，例如：
   | sub-agents 7 | compressions 1
 ```
 
-### 5. 测试（39 个，无需 API key）
+### 5. 测试（53 个，无需 API key）
 
 ```bash
-.venv/bin/python -m pytest tests/ -q              # 全部（e2e 需本地服务器在跑）
-.venv/bin/python -m pytest tests/ -q --ignore=tests/test_e2e_loop.py   # 纯离线
+python -m pytest tests/ -q              # 全部（e2e 需本地服务器在跑）
+python -m pytest tests/ -q --ignore=tests/test_e2e_loop.py   # 纯离线
 ```
 
-- `test_tools / test_hooks / test_tasks / test_context`：38 个单测，stub provider 驱动，~5s
+- `test_tools / test_hooks / test_tasks / test_context`：46 个单测，stub provider 驱动，~7s
 - `test_e2e_loop.py`：**零 token 真实对战**——`DecisionStubProvider` 解析 `[NOW]` 段合法动作直接提交，跑完整协议、落盘、postmortem 全链路（需 8964 服务器）
 
 ## 配置（`config.toml`，可覆盖 `AgentConfig` 全部默认值）
 
 | 配置项 | 默认 | 说明 |
 |---|---|---|
-| `provider` | `anthropic` | provider 注册表键名 |
-| `model` | `claude-sonnet-4-5` | 主决策模型 |
-| `compressor_model` | `claude-haiku-4-5` | 压缩/复盘等后台便宜模型（`subagent_model` 不设时也用它） |
+| `provider` | `openai` | provider 注册表键名（`openai` / `anthropic`） |
+| `model` | `your-model-name` | 主决策模型 |
+| `base_url` | `https://api.example.com/v1` | OpenAI 兼容端点；不设时读 `OPENAI_BASE_URL`，再不设走 api.openai.com |
+| `api_key` | 空 | 不设时读 `OPENAI_API_KEY`，再不设用 `"EMPTY"`（本地 vLLM 不校验） |
+| `compressor_model` | `your-model-name` | 压缩/复盘等后台便宜模型（`subagent_model` 不设时也用它） |
 | `battle_format` | `gen9randombattle` | 对战格式 |
 | `server_host` / `server_port` | `localhost` / `8964` | 本地 Showdown 服务器地址 |
 | `turn_budget` | 45.0s | 整回合硬预算（`asyncio.wait_for`），超时随机兜底 |
+| `preview_budget` | 20.0s | 阶段1（队伍预览选首发）的硬预算，超时回退随机首发 |
 | `hook_budget` | 5.0s | 决策前 hook 共享时间盒（逐 hook 分片，慢 hook 不拖累其他） |
 | `tool_call_timeout` | 8.0s | 单个工具调用超时 |
 | `max_tool_rounds` | 6 | 每回合工具循环轮数上限 |
@@ -109,6 +131,8 @@ postmortem 每场输出一行，例如：
 | `subagent_timeout` | 120s | 单个子 agent 超时 |
 | `max_threat_analyses_per_battle` | 6 | 每场威胁分析次数上限 |
 | `enable_smogon_hook` | false | Smogon 使用率注入（随机对战无意义，默认休眠；标准排位格式可开） |
+| `log_level` | `INFO` | 进程日志文件级别（`runs/logs/agent-*.log`；控制台始终 WARNING） |
+| `log_llm_conversation` | true | 逐轮落盘完整 LLM 对话（prompt/响应/工具结果 → `llm.jsonl`） |
 | `runs_dir` | `runs` | 对战记录输出目录 |
 
 ## 扩展指南
@@ -141,15 +165,19 @@ pokemon-agent/
 │   ├── postmortem.py         # runs/ 汇总指标
 │   ├── smoke_env.py          # poke-env 连通性冒烟（RandomPlayer vs RandomPlayer）
 │   └── diag_connect.py       # 诊断各玩家 websocket 登录状态
-├── tests/                    # 39 个测试：38 单测 + 1 零 token e2e
-└── runs/                     # 运行时生成：每场 <时间戳>_<battle_tag>/
+├── tests/                    # 53 个测试：52 单测 + 1 零 token e2e
+└── runs/                     # 运行时生成：logs/agent-*.log + 每场 <时间戳>_<battle_tag>/
+                              #   ├── meta.json      配置快照（api_key 脱敏）
+                              #   ├── events.jsonl   逐回合结构化记录（含逐字 CoT）+ 生命周期事件
+                              #   └── llm.jsonl      完整 LLM 对话轨迹（prompt/响应/工具结果）
 ```
 
 详细代码说明见 [docs/architecture.md](docs/architecture.md)。
 
 ## 设计要点
 
-- **终端工具制**：出招必须经 `submit_decision`，对照当前合法动作校验；非法提交返回错误 tool_result 让模型在剩余轮数内重试；轮数/时间耗尽抛 `TurnAbort` → 随机出招兜底，**永不因超时判负**。
+- **终端工具制**：出招必须经 `submit_decision`，对照当前合法动作校验；非法提交返回错误 tool_result 让模型在剩余轮数内重试；轮数/时间耗尽抛 `TurnAbort` → 随机出招兜底，**永不因超时判负**。选首发同理：`submit_lead`（阶段1）校验槽位 1-N，失败抛 `PreviewAbort` → 回退基类随机首发。
+- **两种决策、同一骨架**：`run_preview` / `run_turn` 共享「hook 注入 → prompt 组装 → 工具循环 → 终端工具校验」的骨架，仅 prompt 内容与终端工具不同——预览决策同样逐轮落盘（`team_preview` / `preview_fallback` 事件 + `phase="preview"` 的 llm.jsonl 轨迹）。
 - **速度设计**：关键路径零子 agent（靠单轮并行工具调用 + 预计算知识注入提速）；威胁分析、队预、复盘、压缩全部后台跑便宜模型，摘要经 `IntelStore`（1200 字符截断）注入 prompt，原始研究内容不污染主上下文。
 - **磁盘即真相**：每回合 `TurnRecord`（模型看到的请求、决策、理由、逐字 CoT、工具调用、token、耗时）追加写 `events.jsonl`；压缩只影响 prompt 组装，落盘记录永不丢失。
 - **共享服务器友好**：子 agent 全局并发上限、每回合 token 上限、所有后台调用有超时；Showdown 服务端跑在独立目录。

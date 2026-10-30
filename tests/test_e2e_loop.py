@@ -84,3 +84,17 @@ def test_full_battle_offline_stub(tmp_path):
     assert any(e["type"] == "battle_finished" for e in events)
     # threat-analysis sub-agents fired for revealed opponent species
     assert any(e["type"] == "subagent_done" for e in events)
+
+    # debugging artifacts: config snapshot + full conversation trace
+    assert (run_dirs[0] / "meta.json").exists()
+    llm_entries = [
+        json.loads(line)
+        for line in (run_dirs[0] / "llm.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    kinds = {e["type"] for e in llm_entries}
+    assert "turn_prompt" in kinds
+    assert "llm_response" in kinds
+    # every prompt trace carries the system prompt and the assembled user text
+    prompt_entry = next(e for e in llm_entries if e["type"] == "turn_prompt")
+    assert "submit_decision" in prompt_entry["system"]
+    assert "[NOW" in prompt_entry["prompt"]

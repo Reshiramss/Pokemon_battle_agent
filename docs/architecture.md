@@ -7,9 +7,29 @@
 
 ---
 
-## 1. 一次回合的完整时序
+## 1. 决策时序：两个阶段
 
-以一局 `gen9randombattle` 为例，从服务器下发决策请求到出招：
+决策循环分两种（同一套骨架：hook 注入 → prompt 组装 → 工具循环 → 终端工具校验）：
+
+**阶段 1 `run_preview`（选宝可梦，仅预览格式触发）**
+
+```
+Showdown 服务器下发 teampreview 请求（gen9ou 等格式；gen9randombattle 无此阶段）
+   ▼
+PokeAgent.teampreview(battle)                     player.py
+   │ cm = self._context_for(battle)
+   │ runner.submit("team_preview", ...)           # 后台队预分析（fire-and-forget，便宜模型）
+   ▼ asyncio.wait_for(..., preview_budget=20s)
+AgentLoop.run_preview(battle, cm)                  loop.py
+   │ ① hooks.run_pre → ② 组装 [TEAM PREVIEW] prompt（双方全队）
+   │ ③ 工具循环（领域工具 + submit_lead 终端工具）
+   │      submit_lead(slot 1..6, reason) → 校验槽位 → 首发排在 /team 串首位
+   │ 轮数耗尽/provider 报错 → PreviewAbort → 回退基类随机首发
+   ▼
+返回 "/team 2..." 给服务器
+```
+
+**阶段 2 `run_turn`（对战内决策，每回合）**
 
 ```
 Showdown 服务器 (ws://localhost:8964)
@@ -75,18 +95,25 @@ choose_move 捕获三类异常（TimeoutError / TurnAbort / 其他）
 | `_context_for`                           | :149   | 每场一个 ContextManager；创建时把 `LLMCompressor(runner.provider)` 挂上去（便宜模型做压缩）                                                        |
 | `choose_move`                            | :161   | 关键路径：`wait_for(loop.run_turn, turn_budget)`；成功构造 TurnRecord 落盘，异常走 `_record_fallback` + 随机兜底                                 |
 | `_fire_threat_analysis`                  | :231   | 新对手宝可梦 → `runner.submit("threat_analysis")`，每场上限 `max_threat_analyses_per_battle`                                                    |
-| `teampreview`                            | :253   | 立即返回 poke-env 启发式选队顺序；后台提交 team_preview 分析。随机对战无预览 → 自然不触发                                                           |
+| `teampreview`                            | :253   | 阶段1 决策：`wait_for(loop.run_preview, preview_budget)` 让 LLM 经 `submit_lead` 终端工具定首发；失败/超时回退基类随机首发并落 `preview_fallback`。先 fire-and-forget 提交 team_preview 后台分析（其产出供后续回合用，不阻塞首发决策）。随机对战无预览 → 自然不触发 |
 | `_battle_finished_callback`              | :268   | 先 `cancel_battle()`（丢弃战局分析），**再**提交 post_battle 复盘（否则复盘也会被取消）                                                      |
 
-## 4. `pokeagent/loop.py` — AgentLoop 与终端工具
+## 4. `pokeagent/loop.py` — AgentLoop 与两种决策循环
 
-框架的心脏。`run_turn` 每回合全新开始（stateless），流程见 §1。
+框架的心脏。**决策循环分两种**（同一骨架，仅 prompt 内容与终端工具不同）：
 
-- **`SUBMIT_DECISION`**（:37）：`submit_decision` 的 ToolSpec——`{action: move|switch, target, terastallize?, reason}`，`reason` 必填（验收要求每回合有理由）。它是**终端工具**，不在 ToolRegistry 里，由 loop 自己校验。
-- **`TurnOutcome`**（:75）：order（BattleOrder）+ action/target/reason + rounds + cot + tool_calls + token 计数——choose_move 落盘所需的全部。
-- **`_validate_submit`**（:207）：把模型提交的 target 与 `battle.available_moves` / `available_switches` 做 `normalize_name` 匹配；成功返回 `(order, action, target, reason, None)`，失败返回 `(None, ..., error_message)`——错误信息里列出全部合法选项，帮助模型下一轮修正。
-- **`_maybe_fire_threat_analyses`**（:199）：diff `battle.opponent_team` 与 `cm.seen_species`，新登场的 species 触发 `self.on_new_opponent_mon` 回调（player 注入 `_fire_threat_analysis`）。回调异常只 warning，不影响回合。
-- 模型纯文本不出工具时追加 `NUDGE`（manager.py 定义）催促提交。
+- **`run_preview`（阶段1：选宝可梦）**：仅预览格式触发（gen9ou 等；gen9randombattle 自动休眠）。hook 注入知识 → 组装 [TEAM PREVIEW] prompt → 工具循环 → `submit_lead` 终端工具校验槽位 1-6 → `PreviewOutcome`。失败抛 `PreviewAbort` → 回退基类随机首发。
+- **`run_turn`（阶段2：对战内决策）**：流程见 §1。
+
+- **`SUBMIT_DECISION`**（:38）：`submit_decision` 的 ToolSpec——`{action: move|switch, target, terastallize?, reason}`，`reason` 必填（验收要求每回合有理由）。它是**终端工具**，不在 ToolRegistry 里，由 loop 自己校验。
+- **`SUBMIT_LEAD`**（:66）+ **`PREVIEW_SYSTEM_PROMPT`**（:88）：阶段1 的终端工具（`{slot: int, reason}`）与 prompt 模板——双方完整队伍（`describe_pokemon` 一行一只）+ 克制/速度/联防考量指引。
+- **`PreviewOutcome`**（:138）：lead（槽位）+ reason + rounds + cot + tool_calls + token 计数，结构上与 `TurnOutcome`（:126）对齐——teampreview 落盘 `team_preview` 事件所需的全部。
+- **`run_preview`**（:171）：与 run_turn 完全同构——hooks 注入 → 组 prompt → 工具循环（`registry.specs() + [SUBMIT_LEAD]`，`max_tool_rounds` 轮）。**逐轮落盘与 run_turn 一致**，仅多一个 `phase="preview"` 字段，所以 llm.jsonl 里能区分预览轨迹与对战轨迹。
+- **`_validate_lead`**（:311）：槽位必须是 `1..len(team)` 的整数；非法 → 错误 tool_result（列出合法范围）让模型重试。`_validate_submit`（:477）同理：target 与 `battle.available_moves` / `available_switches` 做 `normalize_name` 匹配，错误信息里列出全部合法选项。
+- **`PreviewAbort`**（:108）：预览版 TurnAbort——provider 错误或轮数耗尽时抛出，player 捕获后回退基类随机首发并落 `preview_fallback` 事件。
+- **`_maybe_fire_threat_analyses`**（:464）：diff `battle.opponent_team` 与 `cm.seen_species`，新登场的 species 触发 `self.on_new_opponent_mon` 回调（player 注入 `_fire_threat_analysis`）。回调异常只 warning，不影响回合。
+- 模型纯文本不出工具时追加 `NUDGE`（manager.py 定义）催促提交——两个循环共用。
+- **对话轨迹落盘**：`log_llm_conversation=true`（默认）时，每回合先写一条 `turn_prompt`（system + 完整 prompt + 工具清单），之后每轮写 `llm_response`（文本/工具调用/stop_reason/tokens）和 `tool_results`——进 `cm.log_llm`，落 `llm.jsonl`。任何一回合都可离线复现。
 
 ## 5. `pokeagent/providers/` — LLM 抽象
 
@@ -96,15 +123,19 @@ choose_move 捕获三类异常（TimeoutError / TurnAbort / 其他）
 
 `LLMProvider.complete(*, system, messages, tools, max_tokens)` 是唯一抽象方法。provider 的职责是双向翻译归一化格式 ↔ 原生 API，框架其余代码完全不感知后端差异。
 
-### `anthropic_provider.py` — 默认实现
+### `anthropic_provider.py`
 
 - 凭据从环境读取：`ANTHROPIC_API_KEY`（必需，缺失时构造即报清晰错误）、`ANTHROPIC_BASE_URL`（可选，接内部网关）
 - `_translate_messages`：归一化消息 → Anthropic wire 格式，**合并相邻同角色消息**（API 要求角色交替；多个 tool_result 连续出现时很常见）
 - API 异常**永不冒泡**：捕获后返回 `stop_reason="error"` 的 LLMResponse，loop 收到后抛 TurnAbort → 随机兜底
 
-### `openai_provider.py`
+### `openai_provider.py` — 默认实现
 
-占位（NotImplementedError），演示第二后端的接入点。
+- 走 `chat.completions` wire 格式，兼容任何 OpenAI 风格端点（vLLM / 网关 / 官方）
+- 端点解析顺序：`config.base_url`（`config.toml`）→ `OPENAI_BASE_URL` 环境变量 → api.openai.com；key 同理，最终兜底 `"EMPTY"`（本地 vLLM 不校验）
+- `_translate_messages`：工具结果 → `role:"tool"` 消息（须紧跟持有对应 `tool_calls` 的 assistant 消息，loop 已保证顺序）；`finish_reason` 映射 `tool_calls→tool_use`、`length→max_tokens`，其余视为错误
+- 工具参数 JSON 解析失败时降级为空参数 → 工具返回校验错误 → 模型重发
+- API 异常同样**永不冒泡**，行为与 anthropic_provider 一致
 
 ## 6. `pokeagent/context/` — 上下文管理（核心资产）
 
@@ -115,7 +146,8 @@ choose_move 捕获三类异常（TimeoutError / TurnAbort / 其他）
 
 ### `manager.py` — ContextManager（每场一个）
 
-- **落盘即真相**：`record_turn()` 把 TurnRecord 原样追加进 `runs/<UTC时间戳>_<battle_tag>/events.jsonl`；`log_event()` 写其他事件（battle_start/fallback/subagent_done/compressed/…）。压缩只影响 prompt，落盘永不丢失。
+- **落盘即真相**：`record_turn()` 把 TurnRecord 原样追加进 `runs/<UTC时间戳>_<battle_tag>/events.jsonl`；`log_event()` 写其他事件（battle_start/fallback/subagent_done/compressed/…）；`log_llm()` 把逐轮原始对话追加进同一目录的 `llm.jsonl`（详见 §12）。压缩只影响 prompt，落盘永不丢失。
+- **`_write_meta`**（构造时）：写 `meta.json` 配置快照（模型/provider/全部参数，`api_key` 脱敏为 `<set>`）——事后想知道"这局是什么配置跑的"不用翻日志。
 - **`assemble_prompt(battle, fragments)`**（:200）按固定顺序拼段：
   `[BATTLE INFO]` → `[INTEL 子agent摘要]` → `[KNOWLEDGE hook片段]` → `[HISTORY]` → `[NOW 当前状态+合法动作]`。
   HISTORY 内部（`_history_text`）分两层：旧回合 → LLM 摘要（覆盖到 `summary_covered_seq`）+ 未覆盖旧回合的单行压缩（`_compact_record`：`T3 did move:x (理由) [fallback: ...] saw: ...`）；最近 `recent_turns_verbatim=6` 回合逐字保留。整体超过 `context_token_soft_cap`（chars/4 估算）则硬截断并注明。
@@ -193,12 +225,25 @@ choose_move 捕获三类异常（TimeoutError / TurnAbort / 其他）
 
 ## 11. `scripts/` — CLI 工具
 
-- **run_battle.py**：`--opponent random|heuristic --battles N --config path`。对手 bot 也传 `build_server_configuration(config)`（否则连 8000 端口）。
+- **run_battle.py**：`--opponent random|heuristic --battles N --config path`。启动先 `setup_logging`（`logging_setup.py`）：每次运行生成 `runs/logs/agent-<UTC时间戳>.log`，框架/poke-env 的 logging 与未捕获异常堆栈全部落盘，启动时打印路径。对手 bot 也传 `build_server_configuration(config)`（否则连 8000 端口）。
 - **postmortem.py**：扫 `runs/` 下 events.jsonl，每场一行：胜负/回合数/回退率/CoT 完整率/延迟 mean-p95/token 总量/子 agent 数/压缩次数 + TOTAL 汇总。`--last N` 看最近几场。
 - **smoke_env.py**：RandomPlayer vs RandomPlayer 连通性冒烟（`--port`）。
 - **diag_connect.py**：逐玩家检查 websocket 登录状态（排查连错端口/登录失败用）。
 
-## 12. 落盘格式：`runs/<UTC时间戳>_<battle_tag>/events.jsonl`
+## 12. 落盘格式：`runs/`
+
+一次运行产生四层日志，各司其职：
+
+```
+runs/
+├── logs/agent-<UTC时间戳>.log      进程级日志（每次 run_battle 一个文件）
+└── <UTC时间戳>_<battle_tag>/       每场对战一个目录
+    ├── meta.json                   该场配置快照（api_key 脱敏为 "<set>"）
+    ├── events.jsonl                结构化事件流（postmortem 的数据源）
+    └── llm.jsonl                   LLM 原始对话轨迹（调试复现用，MB 级）
+```
+
+### `events.jsonl` — 结构化事件流
 
 每行一个 JSON 对象，`type` 字段区分：
 
@@ -208,15 +253,30 @@ choose_move 捕获三类异常（TimeoutError / TurnAbort / 其他）
 | `turn`                                                      | 完整 TurnRecord（seq/turn/request/events/decision/reason/**cot 逐字**/tool_calls/tokens/elapsed/fell_back） |
 | `fallback`                                                  | 走了随机兜底的额外标记（turn/reason/elapsed）                                                                     |
 | `subagent_done` / `subagent_timeout` / `subagent_error` | 后台任务生命周期（agent/key/summary 前 1500 字符）                                                                |
-| `compressed` / `compress_error`                           | 压缩换入（covered_seq/chars）或失败                                                                               |
+| `compressed` / `compress_error`                           | 压缩换入（covered_seq/chars/**summary 全文**）或失败                                                               |
 | `battle_finished`                                           | turn / won / lost                                                                                                 |
 
 postmortem.py 只依赖这份文件——日志既是调试真相源，也是离线分析的数据集。
 
+### `llm.jsonl` — LLM 对话轨迹（`log_llm_conversation`，默认开）
+
+loop.py 逐轮写入，任何回合都能离线复现「模型到底看到了什么、说了什么」：
+
+| type           | 内容                                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------------------- |
+| `turn_prompt`  | 本回合完整输入：system prompt + 组装后的 user prompt（INTEL/KNOWLEDGE/HISTORY/NOW 全部）+ 工具名清单   |
+| `llm_response` | 一轮模型输出：text（CoT）/ tool_calls（name+arguments）/ stop_reason / tokens                          |
+| `tool_results` | 该轮工具执行结果：call_id / tool / content / is_error（非法 submit_decision 的报错也在这里）          |
+| `llm_error`    | provider 网关级错误（该回合随后 TurnAbort）                                                             |
+
+### 进程日志 `logs/agent-*.log`
+
+`logging_setup.setup_logging(config)`（run_battle 启动时调用一次）给 root logger 挂 `FileHandler`（级别 `log_level`，默认 INFO）+ 控制台 `StreamHandler`（WARNING）。provider 报错、hook 超时、子 agent 失败、poke-env 玩家日志、未捕获异常堆栈全部落盘。重复调用幂等（换绑不叠加）。
+
 ## 13. 关键设计决策
 
 1. **终端工具制而非解析自然语言**：出招必须是 `submit_decision` 的结构化调用。收益：校验合法性的位置单一、失败可给模型带明确错误的重试、reason 是 schema 必填字段（验收每回合有理由）。
-2. **磁盘即真相，prompt 是派生物**：prompt 丢了随时可以重建，但逐字 CoT 一旦没落盘就永远没了。所以先落盘、后组装；压缩只改写派生物。
+2. **磁盘即真相，prompt 是派生物**：prompt 丢了随时可以重建，但逐字 CoT 一旦没落盘就永远没了。所以先落盘、后组装；压缩只改写派生物。为此落盘分三层：`events.jsonl`（结构化事件，postmortem 数据源）、`llm.jsonl`（模型看到的完整对话逐字复现，仅调试用）、`meta.json`（该场配置快照，api_key 脱敏）——事后排查「为什么这回合这么决策」不需要重跑，直接读文件。
 3. **关键路径零子 agent**：每回合延迟预算 45s，任何后台 LLM 调用都可能吃掉它。子 agent 只做「下一回合才有价值」的分析，产出经 IntelStore 限长注入——用陈旧性换延迟。
 4. **一切失败都兜底**：provider 异常、工具异常、hook 超时、子 agent 崩溃、压缩失败——全部被各自边界捕获并记录，最坏结果只是那一回合随机出招，对战永远不因框架崩溃而判负。
 5. **seq 单调编号贯穿压缩**：turn 号会重复（强制换人请求）、记录只追加——用单调 seq 做「摘要覆盖到哪」的水位线，使后台摘要换入无需任何锁。

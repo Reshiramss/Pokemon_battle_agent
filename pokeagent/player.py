@@ -9,6 +9,7 @@ never stall or forfeit on time.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from dataclasses import replace
@@ -251,19 +252,70 @@ class PokeAgent(Player):
         )
 
     async def teampreview(self, battle: "AbstractBattle") -> str:
-        """Fast heuristic order first; the LLM analysis runs in the background.
+        """Phase-1 decision: the LLM chooses the lead Pokemon.
 
-        In gen9randombattle the server never requests team preview, so this
-        (and the TeamPreviewAnalysisAgent) stay dormant automatically.
+        gen9randombattle never requests team preview, so this stays dormant
+        there; in preview formats the LLM picks the lead within
+        preview_budget and falls back to the base class order on failure.
+        The background TeamPreviewAnalysisAgent still runs — its plan informs
+        early turns, not the lead itself.
         """
-        order = await super().teampreview(battle)
+        cm = self._context_for(battle)
+
+        # background analysis first — its plan is useful from turn 1, even if
+        # the lead itself uses the fast heuristic path
         if self.runner is not None:
-            cm = self._context_for(battle)
             sctx = SubAgentContext(battle=battle, kb=self.kb, intel=cm.intel)
             self.runner.submit(
-                battle.battle_tag, "team_preview", sctx, cm=cm, intel_key="team_preview"
+                battle.battle_tag, "team_preview", sctx, cm=cm,
+                intel_key="team_preview",
             )
-        return order
+
+        started = time.monotonic()
+        try:
+            outcome = await asyncio.wait_for(
+                self.loop.run_preview(battle, cm), timeout=self.config.preview_budget
+            )
+        except Exception as e:  # PreviewAbort, timeout, provider failure...
+            reason = (
+                "preview_budget_exceeded"
+                if isinstance(e, asyncio.TimeoutError)
+                else f"{type(e).__name__}: {e}"
+            )
+            logger.warning("team preview fell back: %s", reason)
+            cm.log_event(
+                "preview_fallback",
+                reason=reason,
+                elapsed_s=round(time.monotonic() - started, 2),
+            )
+            order = super().teampreview(battle)
+            if inspect.isawaitable(order):
+                order = await order
+            return order
+
+        team_list = list(battle.team.values())
+        # base-class order expects the lead FIRST in the /team string
+        members = [outcome.lead] + [
+            i + 1 for i in range(len(team_list)) if i + 1 != outcome.lead
+        ]
+        # VGC-style formats pick 4 — mirror the base class's truncation
+        if battle.format and "vgc" in battle.format:
+            members = members[:4]
+        for i in members:
+            try:
+                team_list[i - 1]._selected_in_teampreview = True
+            except Exception:
+                pass
+        cm.log_event(
+            "team_preview",
+            lead=outcome.lead,
+            reason=outcome.reason,
+            order="/team " + "".join(str(m) for m in members),
+            elapsed_s=round(time.monotonic() - started, 2),
+            input_tokens=outcome.input_tokens,
+            output_tokens=outcome.output_tokens,
+        )
+        return "/team " + "".join(str(m) for m in members)
 
     def _battle_finished_callback(self, battle: "AbstractBattle") -> None:
         cm = self._contexts.get(battle.battle_tag)
