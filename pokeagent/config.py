@@ -94,11 +94,30 @@ class AgentConfig:
         return self.subagent_model or self.compressor_model
 
 
+def _discover_config() -> Path | None:
+    """Find the project's config.toml when --config was not passed.
+
+    Repo root first (deterministic regardless of cwd), then the working
+    directory. Without this, a bare ``run_battle.py`` silently ran on the
+    built-in defaults — wrong model and endpoint — and every LLM call failed.
+    """
+    candidates = (
+        Path(__file__).resolve().parent.parent / "config.toml",
+        Path.cwd() / "config.toml",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def load_config(
     path: str | Path | None = None, overrides: dict[str, Any] | None = None
 ) -> AgentConfig:
     """Build an AgentConfig from defaults, then a TOML file, then explicit overrides."""
     values: dict[str, Any] = {}
+    if path is None:
+        path = _discover_config()
     if path is not None:
         with Path(path).open("rb") as f:
             data = tomllib.load(f)
