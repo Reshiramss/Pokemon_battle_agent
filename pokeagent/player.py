@@ -91,13 +91,11 @@ class PokeAgent(Player):
             team = RawTeambuilder(team)
         if team is not None:
             kwargs["team"] = team
-        super().__init__(
-            battle_format=config.battle_format,
-            server_configuration=server,
-            log_level=log_level,
-            **kwargs,
-        )
-
+        # Everything this subclass touches from poke-env callbacks must be set
+        # BEFORE super().__init__(): with start_listening=True the websocket
+        # client starts on its own thread's event loop immediately, and on
+        # login it can replay a still-running battle — choose_move would
+        # otherwise run against a half-constructed instance.
         self.kb = kb or StaticKB(config.battle_format)
         self.provider = provider or get_provider(config)
         self.registry = registry if registry is not None else self._default_registry()
@@ -113,6 +111,13 @@ class PokeAgent(Player):
         self.loop.on_new_opponent_mon = self._fire_threat_analysis
         self._contexts: dict[str, ContextManager] = {}
         self._threat_counts: dict[str, int] = {}
+
+        super().__init__(
+            battle_format=config.battle_format,
+            server_configuration=server,
+            log_level=log_level,
+            **kwargs,
+        )
 
     def _default_runner(self) -> TaskRunner | None:
         """Background sub-agents on the cheap model, bounded by config.
