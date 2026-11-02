@@ -133,9 +133,10 @@ postmortem 每场输出一行，例如：
 | `provider` | `openai` | LLM 后端（`openai` / `anthropic`） |
 | `model` | 见 `config.py` | 主决策模型 |
 | `base_url` / `api_key` | 空 | OpenAI 兼容端点与密钥；不设时依次读 `OPENAI_BASE_URL` / `OPENAI_API_KEY` |
-| `battle_format` | `gen9randombattle` | 对战格式（改为 `gen9ou` 等预览格式会启用阶段1 选首发） |
+| `battle_format` | `gen9vgc2025regihidden` | 对战格式（自定义 6 选 4 VGC 双打；见上文格式安装） |
 | `server_host` / `server_port` | `localhost` / `8964` | 本地 Showdown 服务器地址 |
-| `turn_budget` / `preview_budget` | 45s / 20s | 两阶段决策的硬预算，超时回退 |
+| `turn_budget` / `preview_budget` | 45s / 30s | 每回合 / 选队决策的硬预算，超时回退 |
+| `two_phase` / `info_rounds` / `decision_rounds` | `True` / `4` / `3` | 每回合两阶段：信息收集（可用信息工具）→ 决策（仅 `submit_decision`）；`two_phase=false` 回到旧单循环 |
 | `runs_dir` | `runs` | 对战记录输出目录 |
 
 完整配置项与默认值见 `pokeagent/config.py`。

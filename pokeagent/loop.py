@@ -1,18 +1,23 @@
-"""The two decision loops: reason -> parallel tool calls -> commit.
+"""The decision loops: reason -> parallel tool calls -> commit.
 
 The loop is the ONLY place that talks to the LLM provider inside
-``choose_move`` / ``teampreview``. Both phases share one skeleton
+``choose_move`` / ``teampreview``. Both entry points share one skeleton
 (hooks -> prompt -> tool loop -> terminal tool) and differ only in prompt
 content and terminal tool:
 
-- ``run_turn`` (in-battle): ends when the model calls ``submit_decision``
-  with a valid choice; otherwise (invalid choice, exhausted rounds) raises
-  ``TurnAbort`` and the player falls back to a random order. Singles and
-  doubles share the v2 schema — in doubles ``actions`` holds one entry per
-  active slot with symbolic move targets.
-- ``run_preview`` (team preview): ends when the model calls ``submit_team``
-  with a valid slot order; otherwise raises ``PreviewAbort`` and the player
-  falls back to the base class's order.
+- ``run_turn`` (in-battle): two phases over ONE message list. The
+  information phase runs the info tools; it ends when the model answers
+  without tool calls, when it submits early (fast path), or at the
+  info-round/time limit. The decision phase then only accepts
+  ``submit_decision``. Either phase committing a valid choice ends the
+  turn; exhausting the decision rounds raises ``TurnAbort`` and the player
+  falls back to a random order. ``two_phase=False`` reproduces the legacy
+  single loop (regression guard). Singles and doubles share the v2 schema
+  — in doubles ``actions`` holds one entry per active slot with symbolic
+  move targets.
+- ``run_preview`` (team preview): a single loop ending at ``submit_team``;
+  otherwise raises ``PreviewAbort`` and the player falls back to the base
+  class's order.
 
 The player wraps both in ``asyncio.wait_for``.
 """
@@ -20,12 +25,18 @@ The player wraps both in ``asyncio.wait_for``.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from poke_env.player import DoubleBattleOrder, PassBattleOrder, Player
 
-from .context.manager import ContextManager, NUDGE
+from .context.manager import (
+    ContextManager,
+    DECISION_PHASE_FORCED,
+    DECISION_PHASE_NUDGE,
+    NUDGE,
+)
 from .context.records import (
     describe_pokemon,
     is_doubles,
@@ -49,6 +60,10 @@ if TYPE_CHECKING:
     from .tasks.runner import TaskRunner
 
 logger = logging.getLogger(__name__)
+
+# of turn_budget: past this point in the info phase the transition to the
+# decision phase is forced so the model still has time to commit
+INFO_PHASE_TIME_FRACTION = 0.6
 
 SUBMIT_DECISION = ToolSpec(
     name="submit_decision",
@@ -201,6 +216,34 @@ class PreviewOutcome:
     tool_calls: list[dict] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+
+
+@dataclass
+class _TurnState:
+    """Cross-phase accounting for one run_turn invocation.
+
+    One turn may span an information phase and a decision phase; the
+    outcome aggregates both.
+    """
+
+    cot_parts: list[str] = field(default_factory=list)
+    tool_log: list[dict] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    rounds: int = 0
+
+    def account(self, resp) -> None:
+        self.input_tokens += resp.input_tokens
+        self.output_tokens += resp.output_tokens
+        self.rounds += 1
+        if resp.text:
+            self.cot_parts.append(resp.text)
+
+    def log_tools(self, calls, round_: int) -> None:
+        for call in calls:
+            self.tool_log.append(
+                {"round": round_, "name": call.name, "arguments": call.arguments}
+            )
 
 
 def _slot_plans(battle) -> list[str]:
@@ -435,6 +478,7 @@ class AgentLoop:
     async def run_turn(self, battle, cm: ContextManager) -> TurnOutcome:
         config = self.config
         ctx = ToolContext(battle=battle, kb=cm.kb, context=cm, config=config)
+        trace = config.log_llm_conversation
 
         self._maybe_fire_threat_analyses(battle, cm)
 
@@ -470,108 +514,249 @@ class AgentLoop:
 
         fragments = await self.hooks.run_pre(ctx, config.hook_budget)
         system, messages = cm.assemble_prompt(battle, fragments)
+        state = _TurnState()
 
-        tool_specs = self.registry.specs() + [SUBMIT_DECISION]
-        cot_parts: list[str] = []
-        tool_log: list[dict] = []
-        in_tokens = out_tokens = 0
+        if not config.two_phase:
+            # legacy single loop: info tools and submit_decision live together
+            specs = self.registry.specs() + [SUBMIT_DECISION]
+            if trace:
+                cm.log_llm(
+                    "turn_prompt",
+                    turn=battle.turn,
+                    phase="single",
+                    system=system,
+                    prompt=messages[0].content,
+                    tools=[t.name for t in specs],
+                )
+            return await self._decision_loop(
+                battle, ctx, cm, system, messages, specs,
+                rounds=config.max_tool_rounds, phase="single",
+                state=state, execute_others=True,
+            )
+
+        outcome, boundary = await self._info_phase(
+            battle, ctx, cm, system, messages, state
+        )
+        if outcome is not None:  # fast path: submitted during information gathering
+            return outcome
+        if trace:
+            cm.log_llm(
+                "phase_transition",
+                turn=battle.turn,
+                phase="decision",
+                forced=boundary == DECISION_PHASE_FORCED,
+            )
+        return await self._decision_loop(
+            battle, ctx, cm, system, messages, [SUBMIT_DECISION],
+            rounds=config.decision_rounds, phase="decision",
+            state=state, execute_others=False,
+        )
+
+    async def _info_phase(self, battle, ctx, cm, system, messages, state):
+        """Gather information with the info tools; then hand off to deciding.
+
+        Returns ``(outcome, boundary)`` — outcome is set only when the model
+        submitted a valid decision early (fast path). The boundary text is
+        the transition message appended to ``messages``; it explains the
+        handoff (and whether it was forced).
+
+        One message list spans both phases, so information gathered here —
+        including tool results — stays visible while deciding (the OpenAI
+        format requires every assistant tool_calls message to be followed
+        by its results anyway).
+        """
+        config = self.config
         trace = config.log_llm_conversation
+        specs = self.registry.specs()  # information tools only, no submit
+        started = time.monotonic()
+        deadline = config.turn_budget * INFO_PHASE_TIME_FRACTION
 
         if trace:
-            # everything the model saw this turn, verbatim — replayable
             cm.log_llm(
                 "turn_prompt",
                 turn=battle.turn,
+                phase="info",
                 system=system,
                 prompt=messages[0].content,
-                tools=[t.name for t in tool_specs],
+                tools=[t.name for t in specs],
             )
 
-        for round_ in range(config.max_tool_rounds):
-            resp = await self.provider.complete(
-                system=system,
-                messages=messages,
-                tools=tool_specs,
-                max_tokens=config.max_tokens_per_call,
+        forced = False
+        for round_ in range(config.info_rounds):
+            # leave the model time to actually commit after the handoff
+            if round_ and time.monotonic() - started > deadline:
+                forced = True
+                break
+            resp = await self._call_llm(
+                cm, system, messages, specs,
+                turn=battle.turn, phase="info", round_=round_,
             )
-            in_tokens += resp.input_tokens
-            out_tokens += resp.output_tokens
-            if resp.text:
-                cot_parts.append(resp.text)
-
-            if resp.stop_reason == "error":
-                if trace:
-                    cm.log_llm(
-                        "llm_error", turn=battle.turn, round=round_, error=resp.error
-                    )
-                raise TurnAbort(f"provider error: {resp.error}")
-
-            messages.append(
-                AssistantMessage(content=resp.text, tool_calls=list(resp.tool_calls))
-            )
-            if trace:
-                cm.log_llm(
-                    "llm_response",
-                    turn=battle.turn,
-                    round=round_,
-                    text=resp.text,
-                    tool_calls=[
-                        {"id": c.id, "name": c.name, "arguments": c.arguments}
-                        for c in resp.tool_calls
-                    ],
-                    stop_reason=resp.stop_reason,
-                    input_tokens=resp.input_tokens,
-                    output_tokens=resp.output_tokens,
-                )
-            for call in resp.tool_calls:
-                tool_log.append(
-                    {"round": round_, "name": call.name, "arguments": call.arguments}
-                )
-
+            state.account(resp)
+            state.log_tools(resp.tool_calls, round_)
             submit = next(
                 (c for c in resp.tool_calls if c.name == "submit_decision"), None
             )
             if submit is not None:
                 order, decision, reason, error = self._validate_submit(battle, submit)
                 if order is not None:
-                    return TurnOutcome(
-                        order=order,
-                        decision=decision,
-                        reason=reason,
-                        rounds=round_ + 1,
-                        cot="\n\n".join(cot_parts),
-                        tool_calls=tool_log,
-                        input_tokens=in_tokens,
-                        output_tokens=out_tokens,
+                    return (
+                        self._turn_outcome(battle, state, order, decision, reason),
+                        None,
                     )
-                # invalid choice: let the model retry with a clear error
-                other_calls = [c for c in resp.tool_calls if c.name != "submit_decision"]
-                results = await self.registry.execute_parallel(ctx, other_calls)
+                # invalid early submit: answer any info calls it bundled,
+                # hand back the validation error, retry in the decision phase
+                others = [c for c in resp.tool_calls if c.name != "submit_decision"]
+                results = await self.registry.execute_parallel(ctx, others)
                 results.append(
                     ToolResultMessage(submit.id, "submit_decision", error, True)
                 )
                 messages.extend(results)
-                if trace:
-                    cm.log_llm(
-                        "tool_results", turn=battle.turn, round=round_,
-                        results=_dump_results(results),
-                    )
+                self._log_results(cm, results, turn=battle.turn, phase="info",
+                                  round_=round_)
+                break  # the model tried to decide — transition now
+            if not resp.tool_calls:
+                break  # the model answered without tools — natural transition
+            results = await self.registry.execute_parallel(ctx, resp.tool_calls)
+            messages.extend(results)
+            self._log_results(cm, results, turn=battle.turn, phase="info",
+                              round_=round_)
+        else:
+            forced = True  # info rounds exhausted while still calling tools
+
+        boundary = DECISION_PHASE_FORCED if forced else DECISION_PHASE_NUDGE
+        messages.append(UserMessage(boundary))
+        return None, boundary
+
+    async def _decision_loop(
+        self, battle, ctx, cm, system, messages, specs, *,
+        rounds: int, phase: str, state: "_TurnState", execute_others: bool,
+    ) -> TurnOutcome:
+        """Accept submit_decision only; retry on invalid submits.
+
+        ``execute_others`` is True on the legacy single path (info tools run
+        as before); in the two-phase decision phase any other tool call is
+        answered with an error instead of crashing — the model reads it and
+        submits.
+        """
+        config = self.config
+        for round_ in range(rounds):
+            resp = await self._call_llm(
+                cm, system, messages, specs,
+                turn=battle.turn, phase=phase, round_=round_,
+            )
+            state.account(resp)
+            state.log_tools(resp.tool_calls, round_)
+            submit = next(
+                (c for c in resp.tool_calls if c.name == "submit_decision"), None
+            )
+            if submit is not None:
+                order, decision, reason, error = self._validate_submit(battle, submit)
+                if order is not None:
+                    return self._turn_outcome(battle, state, order, decision, reason)
+                # invalid choice: let the model retry with a clear error
+                others = [c for c in resp.tool_calls if c.name != "submit_decision"]
+                if execute_others:
+                    results = await self.registry.execute_parallel(ctx, others)
+                else:
+                    results = self._unavailable_results(others)
+                results.append(
+                    ToolResultMessage(submit.id, "submit_decision", error, True)
+                )
+                messages.extend(results)
+                self._log_results(cm, results, turn=battle.turn, phase=phase,
+                                  round_=round_)
                 continue
 
             if resp.tool_calls:
-                results = await self.registry.execute_parallel(ctx, resp.tool_calls)
+                if execute_others:
+                    results = await self.registry.execute_parallel(ctx, resp.tool_calls)
+                else:
+                    results = self._unavailable_results(resp.tool_calls)
                 messages.extend(results)
-                if trace:
-                    cm.log_llm(
-                        "tool_results", turn=battle.turn, round=round_,
-                        results=_dump_results(results),
-                    )
+                self._log_results(cm, results, turn=battle.turn, phase=phase,
+                                  round_=round_)
             else:
                 messages.append(UserMessage(NUDGE))
 
         raise TurnAbort(
-            f"no valid decision after {config.max_tool_rounds} rounds "
+            f"no valid decision after {rounds} rounds "
             f"(turn {battle.turn})"
+        )
+
+    # --- loop plumbing -------------------------------------------------------
+
+    async def _call_llm(self, cm, system, messages, tools, *, turn, phase, round_):
+        """One provider round: complete, trace, append the assistant message.
+
+        Provider-level errors abort the turn (the caller falls back to a
+        random order) — same contract as before, now shared by both phases.
+        """
+        config = self.config
+        resp = await self.provider.complete(
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=config.max_tokens_per_call,
+        )
+        if config.log_llm_conversation:
+            cm.log_llm(
+                "llm_response",
+                turn=turn,
+                phase=phase,
+                round=round_,
+                text=resp.text,
+                tool_calls=[
+                    {"id": c.id, "name": c.name, "arguments": c.arguments}
+                    for c in resp.tool_calls
+                ],
+                stop_reason=resp.stop_reason,
+                input_tokens=resp.input_tokens,
+                output_tokens=resp.output_tokens,
+            )
+        if resp.stop_reason == "error":
+            if config.log_llm_conversation:
+                cm.log_llm(
+                    "llm_error", turn=turn, phase=phase, round=round_,
+                    error=resp.error,
+                )
+            raise TurnAbort(f"provider error: {resp.error}")
+        messages.append(
+            AssistantMessage(content=resp.text, tool_calls=list(resp.tool_calls))
+        )
+        return resp
+
+    def _log_results(self, cm, results, *, turn, phase, round_) -> None:
+        if self.config.log_llm_conversation:
+            cm.log_llm(
+                "tool_results", turn=turn, phase=phase, round=round_,
+                results=_dump_results(results),
+            )
+
+    @staticmethod
+    def _unavailable_results(calls) -> list[ToolResultMessage]:
+        """Answer tool calls that are closed in the current phase."""
+        return [
+            ToolResultMessage(
+                c.id, c.name,
+                f"tool '{c.name}' is not available in the decision phase — "
+                "call `submit_decision` now.",
+                True,
+            )
+            for c in calls
+        ]
+
+    def _turn_outcome(
+        self, battle, state: "_TurnState", order, decision, reason
+    ) -> TurnOutcome:
+        return TurnOutcome(
+            order=order,
+            decision=decision,
+            reason=reason,
+            rounds=state.rounds,
+            cot="\n\n".join(state.cot_parts),
+            tool_calls=state.tool_log,
+            input_tokens=state.input_tokens,
+            output_tokens=state.output_tokens,
         )
 
     # --- internals -----------------------------------------------------------

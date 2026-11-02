@@ -40,10 +40,16 @@ class AgentConfig:
 
     # --- per-turn budgets (seconds) ---
     turn_budget: float = 45.0  # hard asyncio.wait_for around the whole turn loop
-    preview_budget: float = 20.0  # team-preview lead choice (phase-1 decision)
+    preview_budget: float = 30.0  # team-preview pick (a bigger decision than a turn)
     hook_budget: float = 5.0
     tool_call_timeout: float = 8.0
-    max_tool_rounds: int = 6
+    max_tool_rounds: int = 6  # legacy single-loop cap; run_preview still uses it
+
+    # --- two-phase turn loop (info gathering -> decision) ---
+    # False reproduces the legacy single loop (regression guard)
+    two_phase: bool = True
+    info_rounds: int = 4  # max LLM rounds in the information phase
+    decision_rounds: int = 3  # max submit/retry rounds in the decision phase
 
     # --- context management ---
     recent_turns_verbatim: int = 6  # how many recent decisions stay verbatim in prompt

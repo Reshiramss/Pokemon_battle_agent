@@ -66,7 +66,15 @@ class LLMCompressor:
     async def compress(self, records: list[TurnRecord], budget_tokens: int) -> str:
         if not records:
             return ""
-        lines = [_compact_record(r) for r in records]
+        lines = []
+        for r in records:
+            line = _compact_record(r)
+            # a short CoT excerpt per record: the summarizer can then capture
+            # reasoning quality too. The rendered prompt's _compact_record
+            # stays CoT-free so prompts never bloat.
+            if r.cot:
+                line += f" | thought: {r.cot[:200]}"
+            lines.append(line)
         text = "\n".join(lines)[: self.max_input_chars]
         prompt = (
             "Summarize this Pokemon battle's decision history so far. Keep: "

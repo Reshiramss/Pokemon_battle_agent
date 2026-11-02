@@ -27,11 +27,13 @@ def _clip(text: str) -> str:
 class BattleHistoryTool(Tool):
     name = "battle_history"
     description = (
-        "Query this battle's structured history. With no arguments: a one-line "
-        "log of every decision so far (turn, action, reason). With turn=N: the "
-        "full record of that turn — the state you saw, what you decided and "
-        "why, and the battle events of that turn. Set include_raw_protocol=true "
-        "to also get the raw Showdown protocol lines for that turn."
+        "Query this battle's structured history — your own memory. With no "
+        "arguments: a one-line log of every decision so far (turn, action, "
+        "reason). With turn=N (or seq=N, the record number from that log): the "
+        "full record — the state you saw, what you decided and why, and the "
+        "battle events of that turn. Set include_cot=true to also retrieve your "
+        "recorded reasoning (chain of thought) for that turn, or "
+        "include_raw_protocol=true for the raw Showdown lines."
     )
     input_schema = {
         "type": "object",
@@ -39,6 +41,20 @@ class BattleHistoryTool(Tool):
             "turn": {
                 "type": "integer",
                 "description": "Specific turn to inspect; omit for a summary log.",
+            },
+            "seq": {
+                "type": "integer",
+                "description": (
+                    "Record sequence number (takes precedence over turn)."
+                ),
+            },
+            "include_cot": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Include your recorded reasoning (chain of thought) for "
+                    "that turn."
+                ),
             },
             "include_raw_protocol": {
                 "type": "boolean",
@@ -53,20 +69,25 @@ class BattleHistoryTool(Tool):
         self,
         ctx: ToolContext,
         turn: int | None = None,
+        seq: int | None = None,
+        include_cot: bool = False,
         include_raw_protocol: bool = False,
     ) -> str:
         cm = ctx.context
         if cm is None or not cm.records:
             raise ToolError("no battle history recorded yet")
-        if turn is None:
+        if seq is None and turn is None:
             return _clip(self._decision_log(cm.records))
-        record = next((r for r in cm.records if r.turn == turn), None)
+        if seq is not None:
+            record = next((r for r in cm.records if r.seq == seq), None)
+            key = f"seq {seq}"
+        else:
+            record = next((r for r in cm.records if r.turn == turn), None)
+            key = f"turn {turn}"
         if record is None:
-            known = [r.turn for r in cm.records]
-            raise ToolError(
-                f"no record for turn {turn}; recorded turns: {known}"
-            )
-        return _clip(self._full_record(record, include_raw_protocol))
+            known = [f"#{r.seq}/turn {r.turn}" for r in cm.records]
+            raise ToolError(f"no record for {key}; recorded: {known}")
+        return _clip(self._full_record(record, include_raw_protocol, include_cot))
 
     @staticmethod
     def _decision_log(records: "list[TurnRecord]") -> str:
@@ -81,7 +102,9 @@ class BattleHistoryTool(Tool):
         return "\n".join(lines)
 
     @staticmethod
-    def _full_record(r: "TurnRecord", include_raw_protocol: bool) -> str:
+    def _full_record(
+        r: "TurnRecord", include_raw_protocol: bool, include_cot: bool
+    ) -> str:
         lines = [f"=== Turn {r.turn} (record #{r.seq}) ==="]
         if r.request:
             lines.append(r.request.rstrip())
@@ -90,6 +113,9 @@ class BattleHistoryTool(Tool):
             if not r.fell_back
             else f"FALLBACK: {r.decision} ({r.fallback_reason})"
         )
+        if include_cot and r.cot:
+            cot = r.cot[:2000]
+            lines.append("Your reasoning (CoT): " + cot + ("…" if len(r.cot) > 2000 else ""))
         if r.tool_calls:
             calls = "; ".join(
                 f"{c.name}({', '.join(f'{k}={v}' for k, v in c.arguments.items())})"

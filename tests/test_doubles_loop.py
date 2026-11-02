@@ -527,7 +527,9 @@ def test_doubles_rounds_exhausted_aborts(tmp_path):
         loop, cm, provider = make_turn_loop(tmp_path, [])
         with pytest.raises(TurnAbort):
             await loop.run_turn(make_double_battle(), cm)
-        assert len(provider.calls) == loop.config.max_tool_rounds
+        # two-phase flow: the empty info response ends the information phase
+        # after one round (natural transition), then decision_rounds nudges
+        assert len(provider.calls) == 1 + loop.config.decision_rounds
 
     asyncio.run(scenario())
 

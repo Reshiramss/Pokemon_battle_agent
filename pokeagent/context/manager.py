@@ -26,14 +26,18 @@ if TYPE_CHECKING:
     from ..config import AgentConfig
 
 SYSTEM_PROMPT = """You are an expert competitive Pokemon battle agent playing on Pokemon Showdown. \
-Each turn you receive the battle state and must commit your action(s) by calling the \
-`submit_decision` tool.
+Each turn runs in two phases:
 
-How to decide:
-- You may first call other tools (damage calculations, move/type/species lookups, battle history) \
-to inform your decision. Multiple tool calls requested in the same round run in parallel.
-- You MUST finish by calling `submit_decision`. Plain text is never interpreted as a move.
-- `submit_decision` arguments: actions is a list of action objects. \
+1. INFORMATION phase: gather what you need with the information tools \
+(damage calculation, move/type/species/ability lookups, battle history — including \
+your own past reasoning). Tool calls requested in the same round run in parallel. \
+The phase ends as soon as you answer without tool calls. If you already know the \
+best play, call `submit_decision` immediately and skip this phase.
+2. DECISION phase: information tools are closed. You MUST call `submit_decision` \
+to commit your action(s). Plain text is never interpreted as a move. If your \
+submit is rejected, read the error and submit again.
+
+`submit_decision` arguments: actions is a list of action objects. \
 Each has slot (1-based active slot), kind, and the fields for that kind:
   - kind="move": move=<exact move id from the available list> and, in doubles, \
 target=<one of that move's listed targets: auto/self/ally/opp1/opp2>.
@@ -43,17 +47,29 @@ Choose ONLY from the listed options; anything else is rejected and you lose time
 - Singles: submit exactly one action (slot is ignored). \
 Doubles: submit one action per active slot that has choices; slots shown as pass auto-pass.
 - Pass terastallize=true only when the notes say it is available and it is the better play.
-- You have a hard per-turn time budget (~45s). Be decisive: decide within 1-2 tool rounds.
+- You have a hard per-turn time budget (~45s). Be decisive: 1-2 rounds of \
+information are usually enough — then commit.
 
 Battle guidance: weigh type matchups, damage ranges vs both parties' HP, your win condition, \
 the opponent's revealed moves and likely sets, status conditions, priority, and whether \
 switching preserves momentum better than attacking. In doubles, weigh protect timing, \
 speed order, spread moves (0.75x power against both foes), and redirection. \
-Random-battle teams are uneven — identify your best win condition early."""
+Identify your best win condition early."""
 
 NUDGE = (
     "No action committed yet. Call `submit_decision` now with your chosen action, "
     "or make one final round of tool calls if you are still missing critical information."
+)
+
+DECISION_PHASE_NUDGE = (
+    "[DECISION PHASE] Information gathering is over — information tools are no "
+    "longer available. Call `submit_decision` NOW with your chosen action(s) for "
+    "this turn."
+)
+
+DECISION_PHASE_FORCED = (
+    "[DECISION PHASE] You reached the information-gathering limit (rounds or "
+    "time budget). Call `submit_decision` NOW with your best judgment."
 )
 
 
@@ -237,6 +253,36 @@ class ContextManager:
         self.last_now_text = now
         return now
 
+    def _reflection_text(self) -> str | None:
+        """[REFLECTION]: the last decision and what came of it.
+
+        Shown from the second decision onward so the model can adjust instead
+        of repeating itself. Only the most recent record — the verbatim
+        [HISTORY] window already covers anything older.
+        """
+        if not self.records:
+            return None
+        r = self.records[-1]
+        lines = ["[REFLECTION — your last decision and its outcome]"]
+        if r.fell_back:
+            lines.append(
+                f"Last decision loop FAILED — fell back to {r.decision} "
+                f"(reason: {r.fallback_reason}). Do not repeat that failure: "
+                "call `submit_decision` correctly this time."
+            )
+        else:
+            lines.append(f"Your last decision: {r.decision} — {r.reason}")
+            if r.cot:
+                excerpt = r.cot[:600]
+                lines.append(
+                    "Your reasoning then (excerpt): " + excerpt
+                    + ("…" if len(r.cot) > 600 else "")
+                )
+        if r.events:
+            lines.append("What happened: " + "; ".join(r.events[:6]))
+        lines.append("Learn from that outcome, then decide this turn.")
+        return "\n".join(lines)
+
     def _history_text(self) -> str | None:
         """Bounded view of past decisions: summary for old, verbatim for recent."""
         if not self.records:
@@ -293,6 +339,10 @@ class ContextManager:
         history = self._history_text()
         if history:
             sections.append(f"[HISTORY]\n{history}")
+
+        reflection = self._reflection_text()
+        if reflection:
+            sections.append(reflection)
 
         sections.append(f"[NOW — your current decision]\n{self.build_now(battle)}")
 
