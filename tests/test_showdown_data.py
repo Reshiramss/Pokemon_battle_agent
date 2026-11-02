@@ -14,11 +14,13 @@ import pytest
 from helpers import make_battle, make_ctx
 
 from pokeagent.knowledge.showdown_data import get_showdown_data
+from pokeagent.tools.ability_info import AbilityInfoTool
 from pokeagent.tools.base import ToolError
 from pokeagent.tools.static_kb import (
     MoveInfoTool,
     SpeciesInfoTool,
     TypeInfoTool,
+    static_kb_tools,
 )
 
 sd = get_showdown_data()
@@ -97,6 +99,25 @@ def test_move_info_includes_description():
 def test_move_info_unknown():
     with pytest.raises(ToolError):
         asyncio.run(MoveInfoTool().execute(None, move="Splash Dance"))
+
+
+@needs_bundle
+def test_ability_lookup_and_description():
+    result = asyncio.run(AbilityInfoTool().execute(None, ability="Intimidate"))
+    assert result.startswith("Intimidate")
+    assert "lowers the Attack of opponents by 1 stage" in result
+    # Chinese official name resolves through the zh index
+    assert sd.ability("威吓")["name"] == "Intimidate"
+    # unknown abilities raise, not silently match
+    with pytest.raises(ToolError):
+        asyncio.run(AbilityInfoTool().execute(None, ability="NotAnAbility"))
+
+
+@needs_bundle
+def test_ability_tool_registered_in_default_set():
+    names = [t.name for t in static_kb_tools(None)]
+    assert "ability_info" in names
+    assert "move_info" in names and "species_info" in names
 
 
 @needs_bundle

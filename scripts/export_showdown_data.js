@@ -27,9 +27,13 @@ const TABLES = {
 	formats: ['FormatsData', 'formats-data.js'],
 	text_moves: ['MovesText', 'text/moves.js'],
 	text_pokedex: ['PokedexText', 'text/pokedex.js'],
-	// Simplified-Chinese official names (species and moves) for CJK queries
+	abilities: ['Abilities', 'abilities.js'],
+	// zh-cn ability files carry the official Chinese name only (no desc);
+	// descriptions come from the EN text table
+	text_abilities: ['AbilitiesText', 'text/abilities.js'],
 	zh_pokedex: ['PokedexText', 'text/zh-cn/pokedex.js'],
 	zh_moves: ['MovesText', 'text/zh-cn/moves.js'],
+	zh_abilities: ['AbilitiesText', 'text/zh-cn/abilities.js'],
 };
 
 fs.mkdirSync(outDir, { recursive: true });

@@ -252,4 +252,6 @@ class SpeciesInfoTool(Tool):
 
 def static_kb_tools(kb=None) -> list[Tool]:
     """The default static-knowledge tool set for a given StaticKB."""
-    return [MoveInfoTool(kb), TypeInfoTool(kb), SpeciesInfoTool(kb)]
+    from .ability_info import AbilityInfoTool
+
+    return [MoveInfoTool(kb), TypeInfoTool(kb), SpeciesInfoTool(kb), AbilityInfoTool()]

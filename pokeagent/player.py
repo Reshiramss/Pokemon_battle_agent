@@ -28,6 +28,7 @@ from .context.manager import ContextManager
 from .context.records import TurnRecord
 from .hooks.base import HookSystem
 from .knowledge.static import StaticKB
+from .knowledge.tree import BattleKB
 from .loop import AgentLoop, TurnAbort, TurnOutcome
 from .providers import get_provider
 from .providers.base import LLMProvider
@@ -150,10 +151,12 @@ class PokeAgent(Player):
         ]
 
     def _default_hooks(self) -> HookSystem:
+        from .hooks.battle_kb_hook import BattleKBHook
         from .hooks.smogon_usage_hook import SmogonUsageHook
         from .hooks.static_kb_hook import TypeMatchupHook
 
         hooks = HookSystem()
+        hooks.register_pre(BattleKBHook())
         hooks.register_pre(TypeMatchupHook())
         hooks.register_pre(SmogonUsageHook(self.config))
         return hooks
@@ -174,6 +177,7 @@ class PokeAgent(Player):
 
     async def choose_move(self, battle: "AbstractBattle") -> "BattleOrder":
         cm = self._context_for(battle)
+        self._refresh_battle_kb(battle, cm)
         ctx = ToolContext(battle=battle, kb=cm.kb, context=cm, config=self.config)
         started = time.monotonic()
 
@@ -213,6 +217,23 @@ class PokeAgent(Player):
             ctx, decision=record.decision, elapsed_s=elapsed, fell_back=False
         )
         return outcome.order
+
+    def _refresh_battle_kb(self, battle: "AbstractBattle", cm: ContextManager) -> None:
+        """Keep the per-battle knowledge tree current; snapshot it to disk.
+
+        Built lazily (team preview, or the first turn of formats without
+        preview) and refreshed from the live objects every decision point.
+        Never blocks the battle: the tree is an aid, not a dependency.
+        """
+        try:
+            if cm.battle_kb is None:
+                cm.battle_kb = BattleKB()
+                cm.battle_kb.build(battle, self.kb)
+            else:
+                cm.battle_kb.refresh(battle, self.kb)
+            cm.save_battle_kb()
+        except Exception:
+            logger.debug("battle_kb refresh failed", exc_info=True)
 
     async def _record_fallback(
         self, battle, cm: ContextManager, ctx: ToolContext, reason: str, started: float
@@ -275,6 +296,7 @@ class PokeAgent(Player):
         not the selection itself.
         """
         cm = self._context_for(battle)
+        self._refresh_battle_kb(battle, cm)
 
         # background analysis first — its plan is useful from turn 1, even if
         # the lead itself uses the fast heuristic path

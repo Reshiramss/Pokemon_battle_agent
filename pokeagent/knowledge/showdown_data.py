@@ -81,9 +81,16 @@ class ShowdownData:
         self.formats: dict[str, Any] = _load("formats")
         self.text_moves: dict[str, Any] = _load("text_moves")
         self.text_pokedex: dict[str, Any] = _load("text_pokedex")
+        # ability tables (may be absent in bundles from older exports)
+        self.abilities: dict[str, Any] = _load_optional("abilities")
+        self.text_abilities: dict[str, Any] = _load_optional("text_abilities")
         # Simplified-Chinese official names (may be absent in older bundles)
         self._zh: dict[str, dict[str, str]] = {}
-        for table_name, json_name in (("moves", "zh_moves"), ("pokedex", "zh_pokedex")):
+        for table_name, json_name in (
+            ("moves", "zh_moves"),
+            ("pokedex", "zh_pokedex"),
+            ("abilities", "zh_abilities"),
+        ):
             index: dict[str, str] = {}
             for key, entry in _load_optional(json_name).items():
                 if isinstance(entry, dict) and entry.get("name"):
@@ -92,7 +99,11 @@ class ShowdownData:
         # display name (normalized) -> table key, for alias resolution and
         # lookups by display name ("Nidoran-F" -> "nidoranf")
         self._by_name: dict[str, dict[str, str]] = {}
-        for table_name, table in (("moves", self.moves), ("pokedex", self.pokedex)):
+        for table_name, table in (
+            ("moves", self.moves),
+            ("pokedex", self.pokedex),
+            ("abilities", self.abilities),
+        ):
             index: dict[str, str] = {}
             for key, entry in table.items():
                 if isinstance(entry, dict) and entry.get("name"):
@@ -149,6 +160,18 @@ class ShowdownData:
     def species_text(self, name: str) -> dict[str, Any] | None:
         key = self._resolve("pokedex", name)
         return self.text_pokedex.get(key) if key else None
+
+    def ability(self, name: str) -> dict[str, Any] | None:
+        if not self.abilities:
+            return None
+        key = self._resolve("abilities", name)
+        return self.abilities.get(key) if key else None
+
+    def ability_text(self, name: str) -> dict[str, Any] | None:
+        if not self.text_abilities:
+            return None
+        key = self._resolve("abilities", name)
+        return self.text_abilities.get(key) if key else None
 
     def tier(self, name: str) -> str | None:
         """Competitive tier (OU/UU/.../ZU/LC/NFE) or None if unknown."""

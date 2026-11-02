@@ -90,6 +90,9 @@ class ContextManager:
         self._seq = 0
         self._replay_offset = 0
         self.last_now_text: str = ""  # the [NOW] section the model saw last
+        # per-battle knowledge tree (knowledge/tree.BattleKB), built by the
+        # player at team preview and refreshed every decision point
+        self.battle_kb = None
         # compression state: an LLM summary covering records with seq <= covered
         self.summary: str | None = None
         self.summary_covered_seq = 0
@@ -208,6 +211,24 @@ class ContextManager:
         events = [" ".join(str(part) for part in msg) for msg in replay[self._replay_offset :]]
         self._replay_offset = len(replay)
         return events
+
+    def save_battle_kb(self) -> None:
+        """Snapshot the knowledge tree to kb_tree.json (postmortem replay).
+
+        Written via a temp file so a crash mid-write never corrupts the
+        previous snapshot; failures are swallowed — the tree is an aid,
+        not a dependency.
+        """
+        if self.battle_kb is None:
+            return
+        try:
+            path = self.run_dir / "kb_tree.json"
+            tmp = path.with_suffix(".json.tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(self.battle_kb.to_json(), f, ensure_ascii=False, indent=1)
+            tmp.replace(path)
+        except Exception:
+            pass
 
     # --- assembly ------------------------------------------------------------
 
