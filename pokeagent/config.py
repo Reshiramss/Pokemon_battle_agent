@@ -63,7 +63,16 @@ class AgentConfig:
     max_threat_analyses_per_battle: int = 6
 
     # --- hooks ---
-    enable_smogon_hook: bool = False  # dormant for random battles; enable for ladder formats
+    # Usage stats hook: loads the local snapshot offline-first, network fetch
+    # only as fallback (see hooks/smogon_usage_hook.py). The stats format is
+    # the REAL ladder id — never the hidden battle format (Smogon's metagame
+    # validation would reject it); None -> battle format with "hidden" stripped.
+    enable_smogon_hook: bool = True
+    smogon_stats_format: str | None = None
+    smogon_stats_snapshot: Path | None = None  # chaos JSON(/.gz) from scripts/fetch_usage_snapshot.py
+    # network fetch fallback when the snapshot is missing/broken — off by
+    # default so battles never stall on a machine without internet
+    smogon_stats_fetch: bool = False
 
     # --- misc ---
     poke_env_log_level: str = "WARNING"

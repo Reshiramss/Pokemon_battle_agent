@@ -142,22 +142,28 @@ class PokeAgent(Player):
         """Domain tools; the submit_decision terminal tool is owned by the loop."""
         from .tools.battle_query import BattleHistoryTool
         from .tools.damage_calc import DamageCalcTool
+        from .tools.mechanics_info import MechanicsInfoTool
         from .tools.static_kb import static_kb_tools
+        from .tools.team_comp import TeamCompTool
 
         return [
             DamageCalcTool(),
             *static_kb_tools(self.kb),
             BattleHistoryTool(),
+            MechanicsInfoTool(),
+            TeamCompTool(),
         ]
 
     def _default_hooks(self) -> HookSystem:
         from .hooks.battle_kb_hook import BattleKBHook
+        from .hooks.mechanics_hook import MechanicsHook
         from .hooks.smogon_usage_hook import SmogonUsageHook
         from .hooks.static_kb_hook import TypeMatchupHook
 
         hooks = HookSystem()
         hooks.register_pre(BattleKBHook())
         hooks.register_pre(TypeMatchupHook())
+        hooks.register_pre(MechanicsHook())
         hooks.register_pre(SmogonUsageHook(self.config))
         return hooks
 

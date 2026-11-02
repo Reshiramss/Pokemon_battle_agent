@@ -1,0 +1,153 @@
+{
+  "topics": {
+    "turn_order": {
+      "title": "Turn order and speed",
+      "aliases": ["speed", "priority", "who moves first", "speed tie", "trick room"],
+      "summary": "Moves execute in priority brackets first, then by speed; equal speed is a 50/50 coin flip. Trick Room inverts the speed comparison.",
+      "details": [
+        "Switches always resolve before moves, in any speed order.",
+        "Priority brackets: Protect +4, Fake Out +3, Extreme Speed +2, most status moves 0, Trick Room -7. A higher bracket moves first regardless of speed.",
+        "Within a bracket, higher Speed stat moves first; an exact speed tie is decided randomly each turn.",
+        "Trick Room (while active, 5 turns) reverses the speed comparison: the SLOWER Pokemon moves first. Speed boosts and penalties still apply before the inversion.",
+        "Common speed modifiers: Tailwind doubles your side's Speed, paralysis quarters it, Icy Wind/Electroweb lower by one stage, Choice Scarf multiplies by 1.5x."
+      ]
+    },
+    "spread_moves": {
+      "title": "Spread moves in doubles",
+      "aliases": ["spread", "rock slide", "earthquake", "both foes", "0.75"],
+      "summary": "Moves that target 'all adjacent foes' hit both opponents at 0.75x power; the discount stays even if one foe faints mid-turn.",
+      "details": [
+        "Spread moves (Rock Slide, Earthquake, Dazzling Gleam, Icy Wind, Eruption...) deal 75% power to EACH of the two foes — usually more total damage than one full-power hit, less per target.",
+        "Wide Guard (priority +3) protects a side from spread moves entirely; Feint breaks it.",
+        "Accuracy is rolled per target: a 90% Rock Slide can hit one foe and miss the other.",
+        "Spread moves ignore redirection (Follow Me/Rage Powder do not pull them).",
+        "Single-target moves keep full 100% power — prefer them when you need to KO one specific threat."
+      ]
+    },
+    "protect": {
+      "title": "Protect and detection",
+      "aliases": ["detect", "baneful bunker", "spiky shield", "protect decay"],
+      "summary": "Protect blocks most damaging and status moves that turn, but consecutive uses decay to 1/3 then 1/9 success.",
+      "details": [
+        "Priority +4: always resolves before attacks.",
+        "Consecutive Protect success: ~100% -> 1/3 -> 1/9...; resetting by choosing another action restores 100%.",
+        "Bypassed by Feint, Hyperspace Fury, attacks that ignore protection, and by status moves that set entry hazards or weather.",
+        "In doubles Protect is a tempo tool: scout the opponent's choices, stall a Trick Room or weather turn, or shield while a partner sets up.",
+        "Fake Out (priority +3, first turn out only) is NOT blocked-piercing but only flinches; it is a common lead option alongside Protect."
+      ]
+    },
+    "redirection": {
+      "title": "Redirection",
+      "aliases": ["follow me", "rage powder", "ally switch", "lightning rod", "storm drain"],
+      "summary": "Follow Me / Rage Powder pull single-target moves onto the redirector, shielding the partner; some immunities resist the pull.",
+      "details": [
+        "Follow Me and Ally Switch have priority +2; Rage Powder +2 but is a powder move: Grass-types, Overcoat and Safety Goggles ignore it.",
+        "Lightning Rod (Electric) and Storm Drain (Water) draw moves of their type, negate the damage, and raise the redirector's Special Attack by one stage.",
+        "Redirection only affects single-target moves aimed at that side; spread moves, self-targeting and already-locked targets are unaffected.",
+        "Classic use: redirect attacks away from a frail sweeper or a Trick Room setter for one turn."
+      ]
+    },
+    "weather": {
+      "title": "Weather",
+      "aliases": ["rain", "sun", "sand", "snow", "hail", "drought", "drizzle"],
+      "summary": "Rain boosts Water 1.5x and weakens Fire 0.5x; sun does the reverse; sand/snow chip non-immunes and buff defensive types.",
+      "details": [
+        "Rain: Water x1.5, Fire x0.5, Hurricane and Thunder never miss, hydration/dry-skin heal. Sun: Fire x1.5, Water x0.5, Solar Beam no charge.",
+        "Sandstorm chips 1/16 per turn (Rock/Ground/Steel immune); Snow chips 1/16 (Ice immune) and boosts Ice mons' Defense 1.5x.",
+        "Weather abilities set it on entry (Drizzle/Drought/Sand Stream/Snow Warning) — overriding a previous weather; moves set 5 turns (8 with the rocks).",
+        "Ability-weather (Drizzle etc.) is permanent until replaced; the move-based counter cannot override it.",
+        "VGC tempo: weather wars decide damage math — check the current weather before picking a STAB move."
+      ]
+    },
+    "terrain": {
+      "title": "Terrain",
+      "aliases": ["electric terrain", "grassy terrain", "misty terrain", "psychic terrain"],
+      "summary": "Terrains only affect grounded Pokemon: Electric prevents sleep, Grassy heals 1/16 and weakens Earthquake, Misty blocks status, Psychic blocks priority.",
+      "details": [
+        "Electric Terrain: grounded mons cannot be put to sleep and Electric moves gain 1.3x power.",
+        "Grassy Terrain: heals grounded mons 1/16 each turn, boosts Grass 1.3x, weakens Earthquake/Magnitude/Bulldoze 0.5x.",
+        "Misty Terrain: grounded mons are immune to non-volatile status and confusion, Dragon moves halved against them.",
+        "Psychic Terrain: grounded mons cannot be hit by priority moves (blocks Fake Out and Extreme Speed), Psychic 1.3x.",
+        "Terrains last 5 turns (8 with extenders), replace each other, and coexist with weather — both can be active at once."
+      ]
+    },
+    "status": {
+      "title": "Status conditions",
+      "aliases": ["burn", "poison", "paralysis", "sleep", "freeze", "toxic"],
+      "summary": "Burn halves physical damage and chips; Toxic poison escalates; paralysis quarters speed and 25% full-stops; sleep/freeze disable.",
+      "details": [
+        "Burn: 1/16 chip per turn, physical damage halved (Fire-types immune).",
+        "Poison: 1/8 chip (Steel/Poison immune); Toxic poison adds another 1/16 per turn stayed. Toxic counts RESET on switch.",
+        "Paralysis: Speed x0.25, 25% chance to be fully paralyzed. No type is immune in Gen 9 (Limber prevents it on the holder).",
+        "Sleep: 1-3 turns in Gen 9, waking removes the status; blocked by Electric Terrain. Misty Terrain blocks ALL non-volatile status on grounded mons.",
+        "Sleep Clause is NOT standard in VGC: you may put several opposing Pokemon to sleep.",
+        "Freeze: thaw 20% per turn, Fire moves and Scald thaw the user; a frozen mon is effectively removed from the game until then."
+      ]
+    },
+    "stat_stages": {
+      "title": "Stat stages",
+      "aliases": ["stat boost", "stat drop", "boost", "stage", "intimidate"],
+      "summary": "Each stage multiplies the stat: +1 = 1.5x, +2 = 2x, +3 = 2.5x; negatives mirror (-1 = 2/3, -2 = 0.5x), clamped at +/-6.",
+      "details": [
+        "Stage multipliers: 2/8, 2/7, 2/6 (0.67), 2/5 (0.5), 2/4 (0.4), 2/3 (0.29) for -6..-1; +1 1.5x, +2 2x, +3 2.5x, +4 3x, +5 3.5x, +6 4x. Accuracy/evasion use a different table.",
+        "Critical hits ignore the ATTACKER's negative stages and the DEFENDER's positive defense stages.",
+        "Common VGC stat movers: Intimidate (-1 Atk on entry, both foes in doubles), Snarl/Icy Wind (-1 Atk/SpA or Spe to both foes), Parting Shot, Swords Dance/Nasty Plot (+2).",
+        "Contrary inverts changes; Simple doubles them; stat changes are cleared on switching out.",
+        "Spread stat-drops (Snarl, Icy Wind, Struggle Bug) hit BOTH foes — often better tempo than raw damage."
+      ]
+    },
+    "tera": {
+      "title": "Terastallization",
+      "aliases": ["terastallize", "tera type", "crystal"],
+      "summary": "Once per battle, one of your Pokemon terastallizes: its defensive type becomes the Tera type while keeping STAB bonuses.",
+      "details": [
+        "Once per battle each side may terastallize exactly one Pokemon, one time.",
+        "Defensively the mon becomes a mono-type of its Tera type (loses all other defensive types); abilities, items and status persist.",
+        "Offensively it keeps STAB on its ORIGINAL types AND gains STAB on the Tera type; a Tera type matching an original type doubles that STAB to 2x instead of 1.5x.",
+        "Terastallizing also removes some type-based effects? No — it keeps abilities and items; status persists.",
+        "Tera is a one-shot defensive or offensive flip: identify the opponent's likely Tera type (from team context) before committing to a KO move.",
+        "Tera Stellar: 1.5x per move type used once per type, no defensive change."
+      ]
+    },
+    "doubles_specific": {
+      "title": "Doubles-only mechanics",
+      "aliases": ["wide guard", "helping hand", "feint", "doubles", "vgc basics"],
+      "summary": "Doubles adds spread moves, per-slot targeting, support moves (Wide Guard, Helping Hand, Feint), and speed-tie chaos.",
+      "details": [
+        "You pick two actions per turn, one per slot — they resolve in speed order, and a mon KOed before acting never moves (protect or faster KO matters).",
+        "Wide Guard (+3): protects the whole side from spread moves. Quick Guard: blocks priority. Feint (+2): breaks protection and these guards.",
+        "Helping Hand (+5): partner's move gains 1.5x — the strongest single-turn damage boost.",
+        "A target that faints before a single-target move resolves makes the move fail — overkill into an already-dying slot wastes the hit.",
+        "Two foes at equal speed to you: you can still be outsped by either via the random tie.",
+        "Level 50 flat rules: damage variance is +/-15%; EVs are halved in effect (4 EVs = 1 stat point at 50)."
+      ]
+    }
+  },
+  "context_lines": {
+    "weather": {
+      "RAINDANCE": "RAIN is up: Water moves x1.5, Fire x0.5, Hurricane/Thunder always hit.",
+      "SUNNYDAY": "SUN is up: Fire moves x1.5, Water x0.5, Solar Beam needs no charge.",
+      "SANDSTORM": "SAND is up: 1/16 chip per turn to non-Rock/Ground/Steel mons.",
+      "SNOWSCAPE": "SNOW is up: 1/16 chip per turn, Ice-type Defense boosted 1.5x.",
+      "HAIL": "HAIL is up: 1/16 chip per turn to non-Ice mons.",
+      "DESOLATELAND": "Harsh sun (Desolate Land): Water moves fail entirely.",
+      "PRIMORDIALSEA": "Heavy rain (Primordial Sea): Fire moves fail entirely.",
+      "DELTASTREAM": "Strong winds (Delta Stream): supereffective Flying damage is neutralized."
+    },
+    "fields": {
+      "TRICK_ROOM": "TRICK ROOM is active: the SLOWER Pokemon moves first — reconsider your speed assumptions.",
+      "ELECTRIC_TERRAIN": "Electric Terrain: grounded mons can't fall asleep; Electric damage x1.3.",
+      "GRASSY_TERRAIN": "Grassy Terrain: grounded mons heal 1/16 per turn; Earthquake damage halved.",
+      "MISTY_TERRAIN": "Misty Terrain: grounded mons can't be statused or confused.",
+      "PSYCHIC_TERRAIN": "Psychic Terrain: priority moves don't hit grounded mons; Psychic damage x1.3.",
+      "GRAVITY": "Gravity is active: accuracy +5/6 and Flying mons can be hit by Ground moves.",
+      "NEUTRALIZING_GAS": "Neutralizing Gas: all abilities are suppressed while this Pokemon is on the field.",
+      "MAGIC_ROOM": "Magic Room: held items have no effect.",
+      "WONDER_ROOM": "Wonder Room: Defense and Sp. Def stats are swapped.",
+      "MUD_SPOT": "Mud Sport: Electric damage on this field is reduced (x0.33).",
+      "WATER_SPORT": "Water Sport: Fire damage on this field is reduced (x0.33).",
+      "FAIRY_LOCK": "Fairy Lock: grounded mons cannot switch out next turn.",
+      "HEAL_BLOCK": "Heal Block: healing moves and effects fail."
+    }
+  }
+}

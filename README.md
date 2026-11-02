@@ -6,7 +6,7 @@
 
 ## 特性
 
-- **完整 agentic 决策循环**：每回合模型先思考，再并行调用领域工具（伤害计算、招式/种族值/克制知识查询、对战历史查询），最后必须通过 `submit_decision` 终端工具提交决策——框架对照当前合法动作校验，非法提交会带着错误信息重试。
+- **完整 agentic 决策循环**：每回合模型先思考，再并行调用领域工具（伤害计算、招式/种族值/特性/克制知识查询、对战历史与自身推理检索、对局机制百科、对方配队流派识别），最后必须通过 `submit_decision` 终端工具提交决策——框架对照当前合法动作校验，非法提交会带着错误信息重试。
 - **两阶段决策**：队伍预览阶段让模型选首发（`submit_lead`），对战内逐回合出招（`submit_decision`），同一套循环骨架。
 - **永不超时判负**：每个决策有硬时间预算，超时或出错自动回退随机出招——质量降级，但绝不因超时输掉对战。
 - **全程落盘，可复现**：每场对战自动留下完整记录——逐回合的决策与理由、模型的逐字思考过程（CoT）、以及模型看到的**完整对话轨迹**（`llm.jsonl`，prompt/响应/工具结果逐字复现）。
@@ -34,6 +34,17 @@ node scripts/export_showdown_data.js /path/to/pokemon-showdown/dist/data pokeage
 ```
 
 从 pokemon-showdown 的编译产物导出 7 张表（招式/图鉴/属性表/别名/分级/文本）为 JSON。仓库里已带导出好的副本；升级 pokemon-showdown 后重跑一次即可。缺了它这三个工具自动回退到 poke-env 的 GenData，功能不中断。
+
+### 可选：Smogon 使用率快照（离线大数据）
+
+在有外网的机器上一次性下载真实天梯（如 `gen9vgc2025regi`）的使用率快照，之后 agent 完全离线注入对方已揭示宠物的使用率与常见招式/道具/特性：
+
+```bash
+python scripts/fetch_usage_snapshot.py            # 下载到 pokeagent/data/usage/
+# 按脚本输出的 smogon_stats_snapshot 行写进 config.toml 即可
+```
+
+对战机制百科（`pokeagent/data/mechanics.json`）与常见配队流派（`pokeagent/data/team_comps.json`）是仓库自带的策展知识：双打回合恒注入 3 行核心规则、按当前天气/场地追加情境提示，模型也可随时用 `mechanics_info` / `team_comp` 工具查询。
 
 ## 快速开始
 
@@ -137,6 +148,8 @@ postmortem 每场输出一行，例如：
 | `server_host` / `server_port` | `localhost` / `8964` | 本地 Showdown 服务器地址 |
 | `turn_budget` / `preview_budget` | 45s / 30s | 每回合 / 选队决策的硬预算，超时回退 |
 | `two_phase` / `info_rounds` / `decision_rounds` | `True` / `4` / `3` | 每回合两阶段：信息收集（可用信息工具）→ 决策（仅 `submit_decision`）；`two_phase=false` 回到旧单循环 |
+| `smogon_stats_snapshot` | 空 | Smogon 使用率快照文件（`scripts/fetch_usage_snapshot.py` 一次性下载）；设置后离线加载，注入对方已揭示宠物的使用率/常见招式/道具/特性 |
+| `smogon_stats_format` / `smogon_stats_fetch` | 自动 / `false` | 使用率对应的真实天梯格式 id（默认自动去掉隐藏格式的 `hidden` 后缀）；`fetch=true` 允许无快照时联网回退 |
 | `runs_dir` | `runs` | 对战记录输出目录 |
 
 完整配置项与默认值见 `pokeagent/config.py`。

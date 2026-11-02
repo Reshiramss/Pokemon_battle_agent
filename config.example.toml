@@ -13,3 +13,7 @@ model = "your-model-name"
 server_port = 8964                             # must match your Showdown server
 # turn_budget = 45.0                            # hard per-turn wall clock (seconds)
 # runs_dir = "runs"
+# --- Smogon usage stats (offline snapshot; see scripts/fetch_usage_snapshot.py) ---
+# smogon_stats_snapshot = "pokeagent/data/usage/2026-10/gen9vgc2025regi-0.json.gz"
+# smogon_stats_format = "gen9vgc2025regi"       # real ladder id; never the hidden format
+# smogon_stats_fetch = false                   # network fallback when the snapshot is missing

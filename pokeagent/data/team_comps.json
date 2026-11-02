@@ -1,0 +1,46 @@
+{
+  "archetypes": [
+    {
+      "id": "hyper_offense",
+      "name": "Hyper offense",
+      "core_mons": ["calyrexshadow", "miraidon", "ragingbolt", "tornadus", "incineroar", "farigiraf"],
+      "plan": "Overwhelming immediate damage: fast restricted leads (Calyrex-Shadow, Miraidon) punch holes turn 1-3 while a support lead (Incineroar Fake Out, Tornadus Tailwind) buys tempo. They protect to dodge your revenge hits and go for the KO race.",
+      "weak_to": "Trick Room (their speed becomes a liability), priority revenge hits after a fake-out turn, redirection stalling their all-out attacks into Protect."
+    },
+    {
+      "id": "balance",
+      "name": "Restricted-crowned balance",
+      "core_mons": ["zaciancrowned", "zamazentacrowned", "incineroar", "whimsicott", "amoonguss", "gholdengo"],
+      "plan": "Slow, trade-favorable pivoting: Incineroar Parting Shot and Whimsicott Encore/Taunt chip away initiative while the crowned legendaries and Gholdengo take every mid-game fight. Expect Rage Powder redirection and long games.",
+      "weak_to": "A dedicated burst turn (Helping Hand + STAB into a pivot), set-up sweepers that outpace the slow pivoting, Taunt shutting down the support core."
+    },
+    {
+      "id": "rain",
+      "name": "Rain offense",
+      "core_mons": ["kyogre", "archaludon", "urshifurapidstrike", "kilowattrel", "dragonite", "floatzel"],
+      "plan": "Drizzle keeps rain permanent: Water Spout / Origin Pulse from Kyogre hits like a truck, Archaludon's Electro Shot charges instantly, Swift Swim mons (Floatzel) double their speed. They will keep rain up at all costs and sweep with doubled speed and damage.",
+      "weak_to": "A weather override (their own setter), Grass/Dragon/Water-absorb pivots, and priority into the frail Swift Swim sweepers before rain speed lets them outpace you."
+    },
+    {
+      "id": "trick_room",
+      "name": "Trick Room",
+      "core_mons": ["calyrexice", "torkoal", "tinglu", "ursalunabloodmoon", "farigiraf", "amoonguss"],
+      "plan": "Farigiraf or Amoonguss sets Trick Room, then the deliberately slow team (Calyrex-Ice Glacial Lance, Torkoal Eruption, Ursaluna Blood Moon) moves FIRST for four turns. Expect redirection (Rage Powder) to protect the Trick Room setter and spread moves under TR.",
+      "weak_to": "Fake Out / Encore on the Trick Room turn, Taunt blocking the setter, stalling out the four TR turns with Protect, and bulky walls that survive one TR cycle and win the reset race."
+    },
+    {
+      "id": "sun",
+      "name": "Sun offense",
+      "core_mons": ["groudon", "torkoal", "venusaur", "ursaluna", "walkingwake", "kingambit"],
+      "plan": "Drought sun: Groudon's Precipice Blades and Torkoal's Eruption spread boosted Fire damage, Venusaur's Growth doubles in sun and Sleep Powder removes a slot. Chlorophyll doubles the grass sweeper's speed.",
+      "weak_to": "Rain overrides (setting their own weather), Fire resists with bulk, and the same Trick Room inversion tools against their mid-speed core."
+    },
+    {
+      "id": "tailwind_offense",
+      "name": "Tailwind speed control",
+      "core_mons": ["whimsicott", "tornadus", "urshifu", "chienpao", "roaringmoon", "hatterene"],
+      "plan": "Whimsicott or Tornadus sets Tailwind (+3 priority), doubling the side's speed for four turns, then fast attackers (Urshifu, Chien-Pao) pick the opponent apart while outsped. Expect Encore/Taunt pressure and Hatterene's priority-blocking terrain as backup.",
+      "weak_to": "Trick Room flips the speed math against their setup turn, killing the setter before Tailwind lands, and Protect stalling out the four turns."
+    }
+  ]
+}
