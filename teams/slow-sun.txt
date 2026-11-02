@@ -1,0 +1,7 @@
+# name: Slow Sun
+# archetype: trick_room
+# description: Calyrex-Ice Trick Room. Glacial Lance hits both foes under TR; Torkoal
+#   Eruption spreads damage in sun while Drought powers it; Ursaluna-Bloodmoon and
+#   Ting-Lu tank and retaliate. Plan: Farigiraf or Amoonguss sets TR, then the slow
+#   team moves first for four turns.
+Calyrex-Ice|Calyrex-Ice|Clear Amulet|0|Glacial Lance,Icicle Crash,High Horsepower,Protect|Adamant|252,252,0,0,0,4||31,31,31,31,31,0||50|255,,,,,Ice]Torkoal|Torkoal|Charcoal|0|Eruption,Flamethrower,Protect,Stone Edge|Quiet|252,0,0,252,0,0||31,0,31,31,31,0||50|255,,,,,Fire]Ting-Lu|Ting-Lu|Leftovers|0|Snarl,Ruination,Heavy Slam,Protect|Calm|252,0,4,0,252,0||31,0,31,31,31,0||50|255,,,,,Dark]Ursaluna-Bloodmoon|Ursaluna-Bloodmoon|Life Orb|0|Blood Moon,Earth Power,Hyper Voice,Protect|Quiet|252,0,0,252,0,0||31,0,31,31,31,0||50|255,,,,,Normal]Farigiraf|Farigiraf|Sitrus Berry|1|Trick Room,Psychic,Dazzling Gleam,Helping Hand|Quiet|252,0,0,4,252,0|F|31,0,31,31,31,0||50|255,,,,,Fairy]Amoonguss|Amoonguss|Rocky Helmet|H|Spore,Pollen Puff,Rage Powder,Protect|Relaxed|252,0,4,0,252,0||31,0,31,31,31,0||50|255,,,,,Grass

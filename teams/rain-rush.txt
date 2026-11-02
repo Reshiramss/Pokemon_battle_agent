@@ -1,0 +1,6 @@
+# name: Rain Rush
+# archetype: rain
+# description: Kyogre rain offense. Drizzle boosts Water Spout to nuke levels;
+#   Archaludon's Electro Shot charges instantly in rain; Floatzel doubles its speed
+#   with Swift Swim. Plan: keep rain up, sweep with doubled speed.
+Kyogre|Kyogre|Choice Specs|0|Water Spout,Origin Pulse,Thunder,Ice Beam|Modest|4,0,0,252,0,252||31,0,31,31,31,31||50|255,,,,,Water]Archaludon|Archaludon|Assault Vest|0|Electro Shot,Flash Cannon,Dragon Pulse,Body Press|Modest|252,0,0,252,0,4||31,0,31,31,31,31||50|255,,,,,Steel]Urshifu-Rapid-Strike|Urshifu-Rapid-Strike|Mystic Water|0|Surging Strikes,Close Combat,Aqua Jet,Detect|Jolly|4,252,0,0,0,252|M|31,31,31,31,31,31||50|255,,,,,Water]Kilowattrel|Kilowattrel|Magnet|1|Hurricane,Volt Switch,Tailwind,Protect|Timid|4,0,0,252,0,252||31,0,31,31,31,31||50|255,,,,,Electric]Dragonite|Dragonite|Leftovers|H|Hurricane,Extreme Speed,Earthquake,Protect|Adamant|4,252,0,0,0,252||31,31,31,31,31,31||50|255,,,,,Normal]Floatzel|Floatzel|Life Orb|0|Wave Crash,Liquidation,Ice Punch,Protect|Jolly|4,252,0,0,0,252||31,31,31,31,31,31||50|255,,,,,Water

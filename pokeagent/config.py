@@ -25,10 +25,18 @@ class AgentConfig:
     max_tokens_per_call: int = 2000
 
     # --- battle ---
-    battle_format: str = "gen9randombattle"
+    # Doubles 6-pick-4 VGC without Open Team Sheets: team preview only reveals
+    # the opponent's 6 species. Requires the custom format from
+    # server/custom-formats.ts to be installed on the Showdown server.
+    battle_format: str = "gen9vgc2025regihidden"
     server: str = "localhost"  # "localhost" | "showdown"
     server_host: str = "localhost"
     server_port: int = 8964  # custom port; avoids colliding with poke-env's default 8000
+    # Team for team-preview formats: a team-library name or a raw packed team
+    # string (anything containing "|"). None -> server-assigned team
+    # (random battles only).
+    team: str | None = None
+    teams_dir: Path | None = None  # optional user import dir merged into the library
 
     # --- per-turn budgets (seconds) ---
     turn_budget: float = 45.0  # hard asyncio.wait_for around the whole turn loop

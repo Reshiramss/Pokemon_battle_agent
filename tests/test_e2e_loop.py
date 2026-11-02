@@ -41,6 +41,9 @@ def test_full_battle_offline_stub(tmp_path):
         config = AgentConfig(
             runs_dir=tmp_path / "runs",
             server_port=8964,
+            # singles regression guard — the default format is the doubles VGC
+            # one, which needs teams and lands in test_e2e_doubles.py (Step 6)
+            battle_format="gen9randombattle",
             # keep the battle short for CI friendliness
             max_tool_rounds=3,
         )

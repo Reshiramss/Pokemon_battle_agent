@@ -2,7 +2,12 @@
 
 Usage:
     python scripts/run_battle.py [--opponent random|heuristic] [--battles 1]
-        [--config config.toml]
+        [--config config.toml] [--team NAME] [--opponent-team NAME]
+
+Team-preview formats (the default VGC one) require BOTH sides to bring a
+team: --team picks the agent's team from the library (or a raw packed string
+containing "|"); --opponent-team picks the opponent's, defaulting to a
+different library team when only --team is given.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from poke_env.player import RandomPlayer, SimpleHeuristicsPlayer
 from pokeagent.config import load_config
 from pokeagent.logging_setup import setup_logging
 from pokeagent.player import PokeAgent, build_server_configuration
+from pokeagent.teams import RawTeambuilder, TeamLibrary, resolve_team
 
 logger = logging.getLogger("run_battle")
 
@@ -36,24 +42,49 @@ async def main() -> None:
         "--opponent", choices=sorted(OPPONENTS), default="random"
     )
     parser.add_argument("--battles", type=int, default=1)
+    parser.add_argument(
+        "--team",
+        default=None,
+        help="agent team: library name (see teams/) or raw packed team string",
+    )
+    parser.add_argument(
+        "--opponent-team",
+        default=None,
+        help="opponent team; defaults to a different library team",
+    )
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    overrides = {}
+    if args.team:
+        overrides["team"] = args.team
+    config = load_config(args.config, overrides=overrides or None)
     log_path = setup_logging(config)  # every run leaves runs/logs/agent-<ts>.log
     logger.info(
         "run_battle start: provider=%s model=%s opponent=%s battles=%d "
-        "server=%s:%d log=%s",
+        "server=%s:%d format=%s team=%s log=%s",
         config.provider, config.model, args.opponent, args.battles,
-        config.server_host, config.server_port, log_path,
+        config.server_host, config.server_port, config.battle_format,
+        args.team or "-", log_path,
     )
     print(f"Run log: {log_path}")
 
     agent = PokeAgent(config, max_concurrent_battles=1)
+
     # the opponent must point at the same server — poke-env's default is
     # port 8000, which is not our Showdown instance
+    opponent_team = None
+    if config.team is not None:
+        library = TeamLibrary.from_config(config)
+        opponent_spec = args.opponent_team or library.random_other(
+            resolve_team(config.team, library)
+        ).name
+        opponent_team = resolve_team(opponent_spec, library)
+        logger.info("opponent team: %s", opponent_spec)
     opponent = OPPONENTS[args.opponent](
         max_concurrent_battles=1,
+        battle_format=config.battle_format,
         server_configuration=build_server_configuration(config),
+        team=RawTeambuilder(opponent_team) if opponent_team else None,
     )
 
     await agent.battle_against(opponent, n_battles=args.battles)

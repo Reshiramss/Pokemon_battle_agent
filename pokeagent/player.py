@@ -33,6 +33,7 @@ from .providers import get_provider
 from .providers.base import LLMProvider
 from .tasks.base import SubAgentContext
 from .tasks.runner import TaskRunner
+from .teams import RawTeambuilder, TeamLibrary, resolve_team
 from .tools.base import Tool, ToolContext, ToolRegistry
 
 if TYPE_CHECKING:
@@ -77,6 +78,18 @@ class PokeAgent(Player):
         self.config = config
         server = build_server_configuration(config)
         log_level = getattr(logging, config.poke_env_log_level.upper(), logging.WARNING)
+        # config.team is a library name or raw packed string; an explicit team=
+        # kwarg wins over it. Raw strings are wrapped in RawTeambuilder to
+        # avoid ConstantTeambuilder's lossy re-serialization (it mangles
+        # ability slot codes).
+        team = kwargs.pop("team", None)
+        if team is None and config.team is not None:
+            self.team_library = TeamLibrary.from_config(config)
+            team = resolve_team(config.team, self.team_library)
+        if isinstance(team, str):
+            team = RawTeambuilder(team)
+        if team is not None:
+            kwargs["team"] = team
         super().__init__(
             battle_format=config.battle_format,
             server_configuration=server,

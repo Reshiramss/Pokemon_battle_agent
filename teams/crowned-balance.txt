@@ -1,0 +1,6 @@
+# name: Crowned Balance
+# archetype: balance
+# description: Zacian-Crowned + Zamazenta-Crowned balance core. Intrepid Sword and
+#   Dauntless Shield give free stat boosts on entry; Incineroar/Whimsicott/Amoonguss
+#   cover the support roles. Plan: pivot with Parting Shot and Spore, win long games.
+Zacian-Crowned|Zacian-Crowned|Rusted Sword|0|Behemoth Blade,Sacred Sword,Crunch,Protect|Jolly|4,252,0,0,0,252||31,31,31,31,31,31||50|255,,,,,Fairy]Zamazenta-Crowned|Zamazenta-Crowned|Rusted Shield|0|Behemoth Bash,Body Press,Crunch,Protect|Careful|252,0,4,0,0,252||31,0,31,31,31,31||50|255,,,,,Fighting]Incineroar|Incineroar|Heavy-Duty Boots|0|Fake Out,Flare Blitz,Parting Shot,Knock Off|Careful|252,0,4,0,252,0|F|31,31,31,31,31,31||50|255,,,,,Water]Whimsicott|Whimsicott|Focus Sash|0|Tailwind,Moonblast,Encore,Taunt|Timid|4,0,0,0,0,252|M|31,0,31,31,31,31||50|255,,,,,Fairy]Amoonguss|Amoonguss|Rocky Helmet|H|Spore,Pollen Puff,Rage Powder,Protect|Calm|252,0,4,0,252,0||31,0,31,31,31,31||50|255,,,,,Water]Gholdengo|Gholdengo|Air Balloon|0|Make It Rain,Shadow Ball,Nasty Plot,Protect|Modest|4,0,0,252,0,252||31,0,31,31,31,31||50|255,,,,,Water

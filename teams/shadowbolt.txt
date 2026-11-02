@@ -1,0 +1,6 @@
+# name: Shadow Bolt
+# archetype: hyper_offense
+# description: Calyrex-Shadow + Miraidon hyper offense. Astral Barrage and Electro
+#   Drift punch holes while Incineroar provides Fake Out support and Farigiraf can
+#   flip speed with a late Trick Room. Plan: lead fast, overwhelm early.
+Calyrex-Shadow|Calyrex-Shadow|Life Orb|0|Astral Barrage,Psyshock,Tera Blast,Protect|Timid|4,0,0,252,0,252||31,0,31,31,31,31||50|255,,,,,Fairy]Miraidon|Miraidon|Assault Vest|0|Electro Drift,Thunderbolt,Snarl,Volt Switch|Modest|4,0,0,252,0,252||31,31,31,31,31,31||50|255,,,,,Electric]Incineroar|Incineroar|Safety Goggles|Intimidate|Fake Out,Flare Blitz,Parting Shot,Knock Off|Careful|252,0,4,0,252,0|F|31,31,31,31,31,31||50|255,,,,,Water]Raging Bolt|Raging Bolt|Booster Energy|0|Thunderclap,Draco Meteor,Thunderbolt,Protect|Modest|252,0,0,252,0,4||31,20,31,31,31,31||50|255,,,,,Fairy]Tornadus|Tornadus|Covert Cloak|0|Bleakwind Storm,Tailwind,Taunt,Protect|Bold|252,0,4,0,252,0|M|31,0,31,31,31,31||50|255,,,,,Ghost]Farigiraf|Farigiraf|Sitrus Berry|1|Trick Room,Psychic,Dazzling Gleam,Helping Hand|Sassy|252,0,0,4,252,0|F|31,0,31,31,31,0||50|255,,,,,Fairy
