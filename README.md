@@ -27,6 +27,14 @@ cd Pokemon_battle_agent
 pip install -e ".[dev]"
 ```
 
+### 导出 Showdown 静态数据（move_info / type_matchup / species_info 的主数据源）
+
+```bash
+node scripts/export_showdown_data.js /path/to/pokemon-showdown/dist/data pokeagent/data/showdown
+```
+
+从 pokemon-showdown 的编译产物导出 7 张表（招式/图鉴/属性表/别名/分级/文本）为 JSON。仓库里已带导出好的副本；升级 pokemon-showdown 后重跑一次即可。缺了它这三个工具自动回退到 poke-env 的 GenData，功能不中断。
+
 ## 快速开始
 
 ### 1. 启动本地 Showdown 服务器
