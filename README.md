@@ -7,7 +7,7 @@
 ## 特性
 
 - **完整 agentic 决策循环**：每回合模型先思考，再并行调用领域工具（伤害计算、招式/种族值/特性/克制知识查询、对战历史与自身推理检索、对局机制百科、对方配队流派识别），最后必须通过 `submit_decision` 终端工具提交决策——框架对照当前合法动作校验，非法提交会带着错误信息重试。
-- **两阶段决策**：队伍预览阶段让模型选首发（`submit_lead`），对战内逐回合出招（`submit_decision`），同一套循环骨架。
+- **双打 6 选 4 全流程（VGC 规则）**：队伍预览阶段用 `submit_team` 从 6 只中选 4 只携带（前 2 为首发）；对战内每回合 `submit_decision` 提交双槽动作，出招带符号目标（`opp1/opp2/ally/self`），与 `get_possible_showdown_targets` 校验一致。对手信息只显示 6 只种类，招式/道具/特性随对战逐步揭示。
 - **永不超时判负**：每个决策有硬时间预算，超时或出错自动回退随机出招——质量降级，但绝不因超时输掉对战。
 - **全程落盘，可复现**：每场对战自动留下完整记录——逐回合的决策与理由、模型的逐字思考过程（CoT）、以及模型看到的**完整对话轨迹**（`llm.jsonl`，prompt/响应/工具结果逐字复现）。
 - **可插拔后端**：任何 OpenAI 兼容端点（vLLM、Ollama、各类网关、官方 API）或 Anthropic；Provider / Tool / Hook / SubAgent / Compressor 全部是抽象接口，实现 + 注册即可扩展。
@@ -53,10 +53,15 @@ python scripts/fetch_usage_snapshot.py            # 下载到 pokeagent/data/usa
 ```bash
 git clone https://github.com/smogon/pokemon-showdown.git
 cd pokemon-showdown
+# 安装自定义对战格式（一次性；config/custom-formats.ts 是官方扩展点，不改上游代码）
+cp /path/to/Pokemon_battle_agent/server/custom-formats.ts config/custom-formats.ts
+node build                                    # 一次性编译（秒级），把格式编进 dist/config/
 node pokemon-showdown start --no-security --skip-build 8964
 ```
 
 端口任意（默认配置用 8964），与下一步 `config.toml` 里的 `server_port` 保持一致即可。框架会给所有玩家（包括对手 bot）统一传入正确的服务器配置。
+
+自定义格式 `gen9vgc2025regihidden`（[Gen 9] VGC 2025 Reg I (Hidden)）= 官方 Reg I 规则：双打、50 级、带 6 选 4 + 选首发、限两只受限神。Open Team Sheets 在当前 Showdown 是双方主动同意制（双方都在预览时点同意才公开配置），agent 客户端会自动拒绝，因此双方配置保持隐藏、只随对战逐步揭示——这正是我们想要的 6 只种类信息模型。
 
 ### 2. 配置 LLM
 
@@ -82,12 +87,18 @@ export ANTHROPIC_BASE_URL=https://<网关地址>   # 可选，接内部网关时
 
 ```bash
 python scripts/run_battle.py --opponent heuristic --battles 1
-#   --opponent random|heuristic    对手：随机 bot / 启发式 bot
-#   --battles N                    连打 N 场
+#   --opponent random|heuristic|agent  对手：随机 bot / 启发式 bot / 第二个 PokeAgent（AI vs AI）
+#   --battles N                        连打 N 场
+#   --team NAME                        我方队伍（teams/ 库名或 packed 队伍串）；预览格式必填
+#   --opponent-team NAME               对手队伍；缺省时自动选库里另一套
 
 python scripts/postmortem.py            # 汇总 runs/ 下的所有对战
 python scripts/postmortem.py --last 3   # 只看最近 3 场
 ```
+
+`--opponent agent` 是 AI vs AI：第二个 PokeAgent 用同样的模型配置、独立账号与另一套队伍，
+后台子 agent 自动关闭（共享服务器上资源减半）。双方各自的完整记录落在 `runs/`
+下两个目录（按用户名区分），postmortem 各自可读。
 
 ### 4. 人机对战（人类 vs AI）——已写好、尚未实测
 
@@ -161,20 +172,21 @@ python -m pytest tests/ -q                                          # 全部（e
 python -m pytest tests/ -q --ignore=tests/test_e2e_loop.py          # 纯离线
 ```
 
-其中 e2e 测试是**零 token 真实对战**：用 stub provider 跑完整协议、落盘、复盘全链路。
+其中两个 e2e 测试是**零 token 真实对战**（单打 + 双打 AI vs AI）：用 stub provider 跑完整协议、
+落盘、复盘全链路；双打 e2e 验收 6 选 4 预览合法、双槽决策带目标、零回退回合、双方记录目录独立。
 
 ## 架构一览
 
 ```
 Showdown 服务器 ──▶ PokeAgent（poke-env Player 子类）
                      ├─ 阶段1 队伍预览: AgentLoop.run_preview
-                     │     hook 注入知识 → submit_lead 终端工具选首发
-                     │     失败/超时 → 回退基类随机首发
-                     └─ 阶段2 对战决策: AgentLoop.run_turn（每回合）
-                          ① 决策前 hook 并行注入知识（克制矩阵、使用率等）
-                          ② 组装上下文 prompt（情报/知识/历史/当前局面/合法动作）
-                          ③ 工具循环：并行调用伤害计算、知识查询、历史查询
-                          ④ submit_decision 终端工具出招（校验合法性）
+                     │     hook 注入知识 → submit_team 终端工具选 4 只（前 2 首发）
+                     │     失败/超时 → 回退基类默认顺序
+                     └─ 阶段2 对战决策: AgentLoop.run_turn（每回合，两段式）
+                          ① 决策前 hook 并行注入知识（克制矩阵、机制提示、使用率、对方数据树）
+                          ② 组装上下文 prompt（情报/知识/历史/反思/当前局面/合法动作）
+                          ③ 信息阶段：并行调用伤害计算、知识查询、历史检索（上限 4 轮）
+                          ④ 决策阶段：submit_decision 提交双槽动作+目标（校验合法性，上限 3 次重试）
                           失败/超时 → 随机出招兜底，永不判负
                      后台（不阻塞决策，跑便宜模型）：
                        新宝可梦威胁分析 · 战后复盘 · 历史压缩
@@ -188,3 +200,8 @@ Showdown 服务器 ──▶ PokeAgent（poke-env Player 子类）
 - **新 hook**：继承 `PreDecisionHook` / `PostDecisionHook`（`hooks/base.py`），返回一段知识片段即可。
 - **新子 agent**：继承 `SubAgent`（`tasks/base.py`），`TaskRunner.register()` 后任意位置 fire-and-forget。
 - **新压缩策略**：实现 `ContextCompressor` 协议（`context/compressor.py`）。
+
+## 路线图（TODO）
+
+- **蒸馏他人知识**：从高分对战记录/解说中提炼决策知识并入库（`mechanics.json` / `team_comps.json` 的扩展或新增知识模块）。
+- **人机对战实测**：`scripts/human_battle.py` 已写好（见上文第 4 步），等待真实浏览器挑战的端到端验证。

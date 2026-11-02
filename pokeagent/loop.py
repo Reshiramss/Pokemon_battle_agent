@@ -41,6 +41,7 @@ from .context.records import (
     describe_pokemon,
     is_doubles,
     move_target_symbols,
+    preview_pick_count,
     symbol_position,
 )
 from .hooks.base import HookSystem
@@ -314,10 +315,17 @@ class AgentLoop:
             my_team=team_lines or "(unknown)",
             opponent_team=opp_lines or "(unknown)",
         )
+        pick = preview_pick_count(battle)
+        leads_hint = (
+            "The first two slots of your order are the leads."
+            if pick > 1
+            else "The first slot of your order is your lead."
+        )
         user = (
             "[TEAM PREVIEW — your current decision]\n"
             f"Format: {battle.format}\n"
-            "Pick your team for this battle by calling the `submit_team` tool.\n"
+            f"Pick exactly {pick} of your {len(battle.team)} Pokemon by calling "
+            f"the `submit_team` tool with their 1-based team slots. {leads_hint}\n"
         )
 
         tool_specs = self.registry.specs() + [SUBMIT_TEAM]
@@ -459,7 +467,7 @@ class AgentLoop:
             return None, reason, "'order' contains duplicate slots."
 
         if is_doubles(battle):
-            need = battle.max_team_size or 4
+            need = preview_pick_count(battle)
             if len(slots) != need:
                 return (
                     None,

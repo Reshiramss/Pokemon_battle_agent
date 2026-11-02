@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from poke_env.battle import AbstractBattle, Battle, DoubleBattle, Pokemon
 
@@ -56,18 +57,46 @@ class DecisionStubProvider(LLMProvider):
         self.calls: list[str] = []  # one entry per turn: "turn:move" or "turn:switch"
 
     async def complete(self, *, system, messages, tools, max_tokens):
+        # the assembled prompt for the CURRENT decision point is the first
+        # message of this turn's conversation; retried rounds only append
+        # nudges and tool errors, which hold no parseable options. Within
+        # that prompt the LAST "[NOW" is the current turn (recent history
+        # records embed their own stale [NOW] sections).
         latest = None
         for msg in messages:
             text = getattr(msg, "content", None)
-            if text:
+            if text and ("[NOW" in text or "[TEAM PREVIEW" in text):
                 latest = text
-        # only parse the CURRENT turn's options — the prompt also carries
-        # verbatim history whose [NOW] sections would resolve to stale moves
+                break
+        if latest and "[TEAM PREVIEW" in latest:
+            return self._decide_preview(latest, system)
         if latest and "[NOW" in latest:
             latest = latest.rsplit("[NOW", 1)[-1]
         if latest and "Slot 1 (" in latest:
             return self._decide_doubles(latest)
         return self._decide_singles(latest)
+
+    # --- team preview ----------------------------------------------------
+
+    def _decide_preview(self, latest, system):
+        """Pick the first N slots (N stated in the prompt since Step 6)."""
+        m = re.search(r"Pick exactly (\d+) of", latest)
+        pick = int(m.group(1)) if m else 4
+        team_block = system.split("Your team:", 1)[-1].split("Opponent's team:", 1)[0]
+        team_size = sum(1 for line in team_block.splitlines() if line.startswith("- "))
+        order = list(range(1, min(pick, team_size or pick) + 1))
+        self.calls.append("preview:" + "".join(map(str, order)))
+        return LLMResponse(
+            text=f"Reasoning for picking slots {order}.",
+            tool_calls=[
+                ToolCallRequest(
+                    "stub-team",
+                    "submit_team",
+                    {"order": order, "reason": "stub picks the first N slots"},
+                )
+            ],
+            stop_reason="tool_use",
+        )
 
     # --- singles --------------------------------------------------------
 
@@ -107,6 +136,7 @@ class DecisionStubProvider(LLMProvider):
 
     def _decide_doubles(self, latest):
         actions = []
+        claimed_switches: set[str] = set()
         slot = None
         section = None  # "moves" | "switches" | None
         for line in latest.splitlines():
@@ -132,11 +162,15 @@ class DecisionStubProvider(LLMProvider):
             if section == "moves" and "|" in stripped[2:]:
                 self._finish_move(actions, slot, stripped[2:])
             elif section == "switches":
+                name = stripped[2:].split()[0]
+                if name in claimed_switches:
+                    continue  # a bench mon can only be sent to one slot
+                claimed_switches.add(name)
                 actions.append(
                     {
                         "slot": slot,
                         "kind": "switch",
-                        "switch_to": stripped[2:].split()[0],
+                        "switch_to": name,
                     }
                 )
         if not actions:

@@ -25,7 +25,7 @@ from poke_env.ps_client.server_configuration import (
 from .config import AgentConfig
 from .context.compressor import LLMCompressor
 from .context.manager import ContextManager
-from .context.records import TurnRecord
+from .context.records import TurnRecord, preview_pick_count
 from .hooks.base import HookSystem
 from .knowledge.static import StaticKB
 from .knowledge.tree import BattleKB
@@ -114,8 +114,16 @@ class PokeAgent(Player):
         self._contexts: dict[str, ContextManager] = {}
         self._threat_counts: dict[str, int] = {}
 
-    def _default_runner(self) -> TaskRunner:
-        """Background sub-agents on the cheap model, bounded by config."""
+    def _default_runner(self) -> TaskRunner | None:
+        """Background sub-agents on the cheap model, bounded by config.
+
+        Returns None when sub-agents are disabled — a fully synchronous
+        agent (the AI-vs-AI opponent on a shared machine, or minimal
+        deployments) skips the cheap-model provider and all background
+        analyses.
+        """
+        if not self.config.enable_subagents:
+            return None
         from .tasks.post_battle import PostBattleReviewAgent
         from .tasks.team_preview import TeamPreviewAnalysisAgent
         from .tasks.threat_analysis import NewMonThreatAgent
@@ -173,7 +181,10 @@ class PokeAgent(Player):
         cm = self._contexts.get(battle.battle_tag)
         if cm is None:
             cm = ContextManager(
-                battle_tag=battle.battle_tag, config=self.config, kb=self.kb
+                battle_tag=battle.battle_tag,
+                config=self.config,
+                kb=self.kb,
+                label=getattr(self, "username", None),
             )
             # background history compression on the cheap model
             if self.runner is not None and self.runner.provider is not None:
@@ -338,8 +349,9 @@ class PokeAgent(Player):
         # order_list is leads-first and, in doubles, already the picked length
         members = list(outcome.order_list)
         # insurance: never send more slots than the format allows
-        if battle.max_team_size and len(members) > battle.max_team_size:
-            members = members[: battle.max_team_size]
+        limit = preview_pick_count(battle)
+        if len(members) > limit:
+            members = members[:limit]
         team_list = list(battle.team.values())
         for i in members:
             try:

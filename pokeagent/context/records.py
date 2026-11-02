@@ -36,6 +36,22 @@ def is_doubles(battle: "AbstractBattle") -> bool:
     return isinstance(battle, DoubleBattle)
 
 
+def preview_pick_count(battle: "AbstractBattle") -> int:
+    """How many team slots this format picks at team preview (VGC: 4 of 6).
+
+    Newer Showdown servers send the picked-team size as `maxChosenTeamSize`
+    in the team-preview request; poke-env only reads the older `maxTeamSize`
+    key and otherwise falls back to the full team size, so consult the raw
+    request first.
+    """
+    request = getattr(battle, "_last_request", None) or {}
+    for key in ("maxChosenTeamSize", "maxTeamSize"):
+        value = request.get(key)
+        if value:
+            return int(value)
+    return battle.max_team_size or len(battle.team) or 6
+
+
 def target_symbol(position: int, slot_index: int) -> str:
     """Showdown target int -> the symbolic target vocabulary.
 

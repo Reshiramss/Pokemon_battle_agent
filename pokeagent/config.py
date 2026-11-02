@@ -58,6 +58,10 @@ class AgentConfig:
     summary_token_budget: int = 800
 
     # --- sub-agents ---
+    # False -> the agent runs without the background TaskRunner entirely
+    # (no cheap-model provider, no threat analyses/reviews) — used for the
+    # AI-vs-AI opponent to halve resource use on a shared machine.
+    enable_subagents: bool = True
     max_concurrent_subagents: int = 3
     subagent_timeout: float = 120.0
     max_threat_analyses_per_battle: int = 6

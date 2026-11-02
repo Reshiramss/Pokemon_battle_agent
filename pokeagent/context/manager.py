@@ -80,7 +80,13 @@ def _sanitize_tag(battle_tag: str) -> str:
 class ContextManager:
     """One instance per battle. Owns records, intel, and the run directory."""
 
-    def __init__(self, battle_tag: str, config: "AgentConfig", kb=None):
+    def __init__(
+        self,
+        battle_tag: str,
+        config: "AgentConfig",
+        kb=None,
+        label: str | None = None,
+    ):
         self.config = config
         self.battle_tag = battle_tag
         self.kb = kb
@@ -88,9 +94,14 @@ class ContextManager:
         self.records: list[TurnRecord] = []
         self.seen_species: set[str] = set()
 
-        # run directory + persistence
+        # run directory + persistence. The label (the player's username)
+        # keeps AI-vs-AI run dirs from colliding: both sides of one battle
+        # share the battle_tag and can be created within the same second.
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        self.run_dir: Path = config.runs_dir / f"{ts}_{_sanitize_tag(battle_tag)}"
+        name = f"{ts}_{_sanitize_tag(battle_tag)}"
+        if label:
+            name = f"{ts}_{_sanitize_tag(label)}_{_sanitize_tag(battle_tag)}"
+        self.run_dir: Path = config.runs_dir / name
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._events_path = self.run_dir / "events.jsonl"
         self._llm_path = self.run_dir / "llm.jsonl"

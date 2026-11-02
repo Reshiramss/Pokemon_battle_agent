@@ -1,13 +1,15 @@
-"""Run one or more battles: PokeAgent vs a poke-env baseline on the local server.
+"""Run one or more battles: PokeAgent vs a baseline or another PokeAgent.
 
 Usage:
-    python scripts/run_battle.py [--opponent random|heuristic] [--battles 1]
-        [--config config.toml] [--team NAME] [--opponent-team NAME]
+    python scripts/run_battle.py [--opponent random|heuristic|agent]
+        [--battles 1] [--config config.toml] [--team NAME] [--opponent-team NAME]
 
 Team-preview formats (the default VGC one) require BOTH sides to bring a
 team: --team picks the agent's team from the library (or a raw packed string
 containing "|"); --opponent-team picks the opponent's, defaulting to a
-different library team when only --team is given.
+different library team when only --team is given. --opponent agent pits the
+PokeAgent against a second full PokeAgent (same model config, its own team,
+background sub-agents off — half the resource footprint on shared machines).
 """
 
 from __future__ import annotations
@@ -16,11 +18,13 @@ import argparse
 import asyncio
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from poke_env.player import RandomPlayer, SimpleHeuristicsPlayer
+from poke_env.ps_client.account_configuration import AccountConfiguration
 
 from pokeagent.config import load_config
 from pokeagent.logging_setup import setup_logging
@@ -39,7 +43,7 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None, help="path to a config.toml")
     parser.add_argument(
-        "--opponent", choices=sorted(OPPONENTS), default="random"
+        "--opponent", choices=["agent", *sorted(OPPONENTS)], default="random"
     )
     parser.add_argument("--battles", type=int, default=1)
     parser.add_argument(
@@ -80,12 +84,23 @@ async def main() -> None:
         ).name
         opponent_team = resolve_team(opponent_spec, library)
         logger.info("opponent team: %s", opponent_spec)
-    opponent = OPPONENTS[args.opponent](
-        max_concurrent_battles=1,
-        battle_format=config.battle_format,
-        server_configuration=build_server_configuration(config),
-        team=RawTeambuilder(opponent_team) if opponent_team else None,
-    )
+    if args.opponent == "agent":
+        # a second full PokeAgent: same model config, own account/team,
+        # sub-agents off to halve the resource footprint
+        opp_config = replace(config, enable_subagents=False)
+        opponent = PokeAgent(
+            opp_config,
+            account_configuration=AccountConfiguration("PokeAgentOpp", None),
+            max_concurrent_battles=1,
+            team=RawTeambuilder(opponent_team) if opponent_team else None,
+        )
+    else:
+        opponent = OPPONENTS[args.opponent](
+            max_concurrent_battles=1,
+            battle_format=config.battle_format,
+            server_configuration=build_server_configuration(config),
+            team=RawTeambuilder(opponent_team) if opponent_team else None,
+        )
 
     await agent.battle_against(opponent, n_battles=args.battles)
 
