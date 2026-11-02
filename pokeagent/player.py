@@ -200,7 +200,7 @@ class PokeAgent(Player):
             turn=battle.turn,
             request=cm.last_now_text,
             events=cm.new_events(battle),
-            decision=f"{outcome.action}:{outcome.target}",
+            decision=outcome.decision,
             reason=outcome.reason,
             cot=outcome.cot or None,
             tool_calls=outcome.tool_calls,
@@ -265,13 +265,14 @@ class PokeAgent(Player):
         )
 
     async def teampreview(self, battle: "AbstractBattle") -> str:
-        """Phase-1 decision: the LLM chooses the lead Pokemon.
+        """Phase-1 decision: the LLM picks the team and leads (team preview).
 
         gen9randombattle never requests team preview, so this stays dormant
-        there; in preview formats the LLM picks the lead within
-        preview_budget and falls back to the base class order on failure.
-        The background TeamPreviewAnalysisAgent still runs — its plan informs
-        early turns, not the lead itself.
+        there; in preview formats the LLM picks the order (in doubles, the
+        first two entries are the leads) within preview_budget and falls back
+        to the base class order on failure. The background
+        TeamPreviewAnalysisAgent still runs — its plan informs early turns,
+        not the selection itself.
         """
         cm = self._context_for(battle)
 
@@ -306,14 +307,12 @@ class PokeAgent(Player):
                 order = await order
             return order
 
+        # order_list is leads-first and, in doubles, already the picked length
+        members = list(outcome.order_list)
+        # insurance: never send more slots than the format allows
+        if battle.max_team_size and len(members) > battle.max_team_size:
+            members = members[: battle.max_team_size]
         team_list = list(battle.team.values())
-        # base-class order expects the lead FIRST in the /team string
-        members = [outcome.lead] + [
-            i + 1 for i in range(len(team_list)) if i + 1 != outcome.lead
-        ]
-        # VGC-style formats pick 4 — mirror the base class's truncation
-        if battle.format and "vgc" in battle.format:
-            members = members[:4]
         for i in members:
             try:
                 team_list[i - 1]._selected_in_teampreview = True
@@ -321,7 +320,8 @@ class PokeAgent(Player):
                 pass
         cm.log_event(
             "team_preview",
-            lead=outcome.lead,
+            leads=members[:2],
+            order_list=members,
             reason=outcome.reason,
             order="/team " + "".join(str(m) for m in members),
             elapsed_s=round(time.monotonic() - started, 2),

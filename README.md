@@ -78,6 +78,24 @@ python scripts/postmortem.py            # 汇总 runs/ 下的所有对战
 python scripts/postmortem.py --last 3   # 只看最近 3 场
 ```
 
+### 4. 人机对战（人类 vs AI）——已写好、尚未实测
+
+```bash
+python scripts/human_battle.py --team "Shadow Bolt"
+#   --team NAME        从 teams/ 库选队（或直接传 packed 队伍串）
+#   --count N          连打 N 场后退出
+#   --wait-for NAME    只接受来自该用户的挑战（默认接受任何人）
+```
+
+脚本启动后 agent 以 `PokeAgent` 用户名挂机等待挑战。用浏览器打开本地服务器
+（`http://localhost:8964`），任选用户名登录，然后向 `PokeAgent` 发起
+**[Gen 9] VGC 2025 Reg I (Hidden)** 格式的挑战（挑战下拉框里能选到），即可开打。
+agent 侧的选 4/首发/出招流程与 AI vs AI 完全一致；出问题时看 `runs/logs/`
+下当场的 `events.jsonl` / `llm.jsonl`。
+
+> ⚠️ 此路径尚未经过实测，属实验性功能；首次试玩如遇挂起或非法指令，请带着
+> 记录目录反馈。
+
 运行结束后会打印胜负与记录目录：
 
 ```

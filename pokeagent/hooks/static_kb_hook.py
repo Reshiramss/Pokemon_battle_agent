@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..context.records import is_doubles
 from ..knowledge.static import normalize_name
 from .base import PreDecisionHook
 
@@ -35,7 +36,7 @@ def _label(mult: float) -> str:
 
 
 class TypeMatchupHook(PreDecisionHook):
-    """Offense/defense type matrix for the current 1v1 plus revealed moves."""
+    """Offense/defense type matrix for the active mons plus revealed moves."""
 
     name = "type_matchups"
 
@@ -46,10 +47,32 @@ class TypeMatchupHook(PreDecisionHook):
         battle, kb = ctx.battle, ctx.kb
         if kb is None:
             return None
+        if is_doubles(battle):
+            lines = self._doubles(battle, kb)
+        else:
+            lines = self._singles(battle, kb)
+
+        if not lines:
+            return None  # no actives to analyze — dormant, as before
+
+        # --- revealed moves of the whole opponent team (shared) ---
+        revealed = []
+        for mon in battle.opponent_team.values():
+            if mon.moves:
+                names = ", ".join(m.id for m in mon.moves.values())
+                revealed.append(f"{mon.species}: {names}")
+        if revealed:
+            lines.append("Opponent revealed moves so far: " + "; ".join(revealed))
+
+        return "\n".join(lines)
+
+    # --- singles (unchanged behavior) ---------------------------------------
+
+    def _singles(self, battle, kb):
         me = battle.active_pokemon
         opp = battle.opponent_active_pokemon
         if me is None or opp is None:
-            return None
+            return []
 
         opp_types = [_tname(t) for t in opp.types]
         my_types = [_tname(t) for t in me.types]
@@ -81,13 +104,58 @@ class TypeMatchupHook(PreDecisionHook):
                 mult = kb.type_effectiveness(_tname(move.type), my_types)
                 lines.append(f"- {move.id} ({_tname(move.type)}): {_label(mult)}")
 
-        # --- revealed moves of the whole opponent team ---
-        revealed = []
-        for mon in battle.opponent_team.values():
-            if mon.moves:
-                names = ", ".join(m.id for m in mon.moves.values())
-                revealed.append(f"{mon.species}: {names}")
-        if revealed:
-            lines.append("Opponent revealed moves so far: " + "; ".join(revealed))
+        return lines
 
-        return "\n".join(lines) if lines else None
+    # --- doubles -------------------------------------------------------------
+
+    def _doubles(self, battle, kb):
+        """Cross matrix: each of our moves vs both foes, defense reversed.
+
+        Deliberately terse — the whole hook fragment is capped at 1500
+        chars by HookSystem, so per-move lines report both foes at once.
+        """
+        actives = [p for p in battle.active_pokemon if p is not None and not p.fainted]
+        foes = [
+            p for p in battle.opponent_active_pokemon
+            if p is not None and not p.fainted
+        ]
+        if not actives or not foes:
+            return []
+        foe_types = {p.species: [_tname(t) for t in p.types] for p in foes}
+        my_types = {p.species: [_tname(t) for t in p.types] for p in actives}
+        lines: list[str] = []
+
+        # --- offense: each active slot's moves vs each foe ---
+        for slot, mon in enumerate(battle.active_pokemon):
+            if mon is None or mon.fainted:
+                continue
+            moves = list(battle.available_moves[slot] or [])
+            if not moves:
+                continue
+            lines.append(f"Offense — slot {slot + 1} {mon.species}:")
+            seen: set[str] = set()
+            for move in moves[: self.max_moves]:
+                key = normalize_name(getattr(move, "id", str(move)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                vs = " / ".join(
+                    f"{f.species} {_label(kb.type_effectiveness(_tname(move.type), foe_types[f.species]))}"
+                    for f in foes
+                )
+                lines.append(f"- {move.id} ({_tname(move.type)}): {vs}")
+
+        # --- defense: each foe's revealed moves vs each of our actives ---
+        for foe in foes:
+            opp_moves = list(foe.moves.values())
+            if not opp_moves:
+                continue
+            lines.append(f"Defense — {foe.species}'s revealed moves:")
+            for move in opp_moves[: self.max_moves]:
+                vs = " / ".join(
+                    f"{m.species} {_label(kb.type_effectiveness(_tname(move.type), my_types[m.species]))}"
+                    for m in actives
+                )
+                lines.append(f"- {move.id} ({_tname(move.type)}): {vs}")
+
+        return lines

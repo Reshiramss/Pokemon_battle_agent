@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from poke_env.battle import Move
+from poke_env.battle import DoubleBattle, Move
+from poke_env.battle.target import Target
 from poke_env.calc.damage_calc_gen9 import calculate_damage
 
 from ..knowledge.static import normalize_name
@@ -21,6 +22,10 @@ if TYPE_CHECKING:
     from poke_env.battle import AbstractBattle, Pokemon
 
 STAT_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
+
+# moves that hit every adjacent mon — they take the 0.75x spread reduction
+# in doubles when two or more targets are on the field
+SPREAD_TARGETS = {"ALL_ADJACENT", "ALL_ADJACENT_FOES"}
 
 
 class DamageCalcTool(Tool):
@@ -120,6 +125,14 @@ class DamageCalcTool(Tool):
             flags.append("defender stats estimated")
         if critical:
             flags.append("assumed critical hit")
+
+        # doubles spread moves (e.g. Earthquake) hit 2+ targets at 0.75x —
+        # poke-env's calculator does not apply the reduction
+        spread = self._is_spread_hit(battle, atk[1], move_obj)
+        if spread:
+            min_dmg = max(1, round(min_dmg * 0.75))
+            max_dmg = max(1, round(max_dmg * 0.75))
+            flags.append("spread-adjusted estimate: x0.75, move hits 2+ targets")
         note = (" Assumptions: " + "; ".join(flags) + ".") if flags else ""
         return (
             f"{move_obj.id}: {atk[1].species} -> {dfn[1].species}: "
@@ -127,6 +140,28 @@ class DamageCalcTool(Tool):
         )
 
     # --- internals -----------------------------------------------------------
+
+    def _is_spread_hit(
+        self, battle: "AbstractBattle", attacker: "Pokemon", move_obj: Move
+    ) -> bool:
+        """True if this move lands as a reduced-power spread hit right now."""
+        if not isinstance(battle, DoubleBattle):
+            return False
+        target = getattr(move_obj, "target", None)
+        if target is None or target.name not in SPREAD_TARGETS:
+            return False
+        hits = [
+            p
+            for p in battle.opponent_active_pokemon
+            if p is not None and not p.fainted
+        ]
+        if target is Target.ALL_ADJACENT:
+            hits += [
+                p
+                for p in battle.active_pokemon
+                if p is not None and not p.fainted and p is not attacker
+            ]
+        return len(hits) >= 2
 
     def _find(self, ctx: ToolContext, name: str):
         """Resolve a name to (identifier, Pokemon) among both teams.

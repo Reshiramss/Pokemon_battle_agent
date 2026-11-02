@@ -7,10 +7,12 @@ content and terminal tool:
 
 - ``run_turn`` (in-battle): ends when the model calls ``submit_decision``
   with a valid choice; otherwise (invalid choice, exhausted rounds) raises
-  ``TurnAbort`` and the player falls back to a random order.
-- ``run_preview`` (team preview): ends when the model calls ``submit_lead``
-  with a valid team slot; otherwise raises ``PreviewAbort`` and the player
-  falls back to the base class's random lead order.
+  ``TurnAbort`` and the player falls back to a random order. Singles and
+  doubles share the v2 schema — in doubles ``actions`` holds one entry per
+  active slot with symbolic move targets.
+- ``run_preview`` (team preview): ends when the model calls ``submit_team``
+  with a valid slot order; otherwise raises ``PreviewAbort`` and the player
+  falls back to the base class's order.
 
 The player wraps both in ``asyncio.wait_for``.
 """
@@ -21,10 +23,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from poke_env.player import Player
+from poke_env.player import DoubleBattleOrder, PassBattleOrder, Player
 
 from .context.manager import ContextManager, NUDGE
-from .context.records import describe_pokemon
+from .context.records import (
+    describe_pokemon,
+    is_doubles,
+    move_target_symbols,
+    symbol_position,
+)
 from .hooks.base import HookSystem
 from .knowledge.static import normalize_name
 from .providers.base import (
@@ -46,50 +53,90 @@ logger = logging.getLogger(__name__)
 SUBMIT_DECISION = ToolSpec(
     name="submit_decision",
     description=(
-        "Commit your chosen action for this turn. This ends the turn. "
-        "Plain text is never interpreted as a move."
+        "Commit your chosen action(s) for this turn. This ends the turn. "
+        "Plain text is never interpreted as a move. Singles: exactly one "
+        "action (slot is ignored). Doubles: one action per active slot that "
+        "has choices — slots without choices auto-pass."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["move", "switch"],
-                "description": (
-                    "action=move: the exact move id; "
-                    "action=switch: the exact species name from the switch list"
-                ),
+            "actions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "slot": {
+                            "type": "integer",
+                            "description": "1-based active slot (doubles: 1 or 2).",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["move", "switch", "pass"],
+                            "description": (
+                                "move: pick 'move'; switch: pick 'switch_to'; "
+                                "pass: only where the slot list says pass is legal"
+                            ),
+                        },
+                        "move": {
+                            "type": "string",
+                            "description": "exact move id (kind=move).",
+                        },
+                        "switch_to": {
+                            "type": "string",
+                            "description": (
+                                "species name from the switch list (kind=switch)."
+                            ),
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["auto", "self", "ally", "opp1", "opp2"],
+                            "description": (
+                                "doubles move target — one of the move's listed "
+                                "targets (kind=move; ignored in singles)"
+                            ),
+                        },
+                        "terastallize": {"type": "boolean"},
+                    },
+                    "required": ["slot", "kind"],
+                },
             },
-            "target": {"type": "string"},
-            "terastallize": {"type": "boolean"},
             "reason": {
                 "type": "string",
                 "description": "One short sentence explaining the choice.",
             },
         },
-        "required": ["action", "target", "reason"],
+        "required": ["actions", "reason"],
     },
 )
 
-SUBMIT_LEAD = ToolSpec(
-    name="submit_lead",
+SUBMIT_TEAM = ToolSpec(
+    name="submit_team",
     description=(
-        "Commit your lead Pokemon for the upcoming battle (team-preview "
-        "decision). This is the phase-1 decision before the battle starts."
+        "Commit your team selection for the upcoming battle (team-preview "
+        "decision). In pick-N doubles formats the order list holds exactly N "
+        "slots: the FIRST TWO are your leads, the rest your back row. In "
+        "singles the first entry is your lead."
     ),
     input_schema={
         "type": "object",
         "properties": {
-            "slot": {
-                "type": "integer",
-                "description": "1-based slot of the lead Pokemon (1-6).",
+            "order": {
+                "type": "array",
+                "items": {
+                    "type": "integer",
+                    "description": "1-based team slot of a picked Pokemon.",
+                },
+                "description": "Picked slots, leads first.",
             },
             "reason": {
                 "type": "string",
-                "description": "One short sentence explaining the lead choice.",
+                "description": "One short sentence explaining the selection.",
             },
         },
-        "required": ["slot", "reason"],
+        "required": ["order", "reason"],
     },
 )
 
@@ -102,11 +149,12 @@ Your team:
 Opponent's team:
 {opponent_team}
 
-Choose your lead Pokemon. Consider type matchups against the likely opposing \
-lead, speed tiers, entry-hazard control, and team synergy. In best-of-one \
-play, favor leads that are immediately useful. You MUST call the \
-`submit_lead` tool with the chosen slot number (1-6) and a one-sentence \
-reason."""
+Select your Pokemon for this battle by calling the `submit_team` tool with an \
+`order` list of 1-based team slots. In pick-N doubles formats (e.g. VGC \
+6-pick-4) the list holds exactly N slots and the FIRST TWO are your leads. \
+In singles the first entry is your lead. Consider type matchups against the \
+likely opposing leads, speed tiers, and team synergy. In best-of-one play, \
+favor leads that are immediately useful. Finish with a one-sentence reason."""
 
 
 class TurnAbort(Exception):
@@ -114,7 +162,7 @@ class TurnAbort(Exception):
 
 
 class PreviewAbort(Exception):
-    """Raised when the loop cannot produce a lead choice; caller falls back."""
+    """Raised when the loop cannot produce a team order; caller falls back."""
 
 
 def _dump_results(results: list[ToolResultMessage]) -> list[dict]:
@@ -133,8 +181,7 @@ def _dump_results(results: list[ToolResultMessage]) -> list[dict]:
 @dataclass
 class TurnOutcome:
     order: Any  # BattleOrder
-    action: str
-    target: str
+    decision: str  # e.g. "move:earthquake" or "slot1:move:icebeam->opp1 | slot2:pass"
     reason: str
     rounds: int
     cot: str = ""
@@ -145,14 +192,38 @@ class TurnOutcome:
 
 @dataclass
 class PreviewOutcome:
-    """What run_preview returned: lead slot + reason."""
-    lead: int
+    """What run_preview returned: team slots, leads first."""
+
+    order_list: list[int]
     reason: str
     rounds: int
     cot: str = ""
     tool_calls: list[dict] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+
+
+def _slot_plans(battle) -> list[str]:
+    """Per-slot 'act' / 'pass' plan for a doubles decision request.
+
+    A slot plans to 'pass' when it has no decision to make: it is being
+    force-switched with no replacement available, it sits out a mid-turn
+    forced-switch decision (only the forced slot chooses), or it simply has
+    no moves or switches. Everything else must receive an action.
+    """
+    forced = list(battle.force_switch)
+    plans: list[str] = []
+    for i in range(2):
+        if forced[i]:
+            plans.append("act" if battle.available_switches[i] else "pass")
+        elif any(forced):
+            plans.append("pass")
+        else:
+            has_choice = bool(battle.available_moves[i]) or bool(
+                battle.available_switches[i]
+            )
+            plans.append("act" if has_choice else "pass")
+    return plans
 
 
 class AgentLoop:
@@ -177,10 +248,10 @@ class AgentLoop:
     # --- phase 1: team preview ---------------------------------------------
 
     async def run_preview(self, battle, cm: ContextManager) -> PreviewOutcome:
-        """Phase-1 decision: choose the lead Pokemon (team preview).
+        """Phase-1 decision: pick the team and leads (team preview).
 
         Mirrors run_turn's shape: hooks -> prompt -> tool loop with the
-        submit_lead terminal tool, bounded by the same budgets.
+        submit_team terminal tool, bounded by the same budgets.
         """
         config = self.config
         ctx = ToolContext(battle=battle, kb=cm.kb, context=cm, config=config)
@@ -203,10 +274,10 @@ class AgentLoop:
         user = (
             "[TEAM PREVIEW — your current decision]\n"
             f"Format: {battle.format}\n"
-            "Choose your lead Pokemon by calling the `submit_lead` tool.\n"
+            "Pick your team for this battle by calling the `submit_team` tool.\n"
         )
 
-        tool_specs = self.registry.specs() + [SUBMIT_LEAD]
+        tool_specs = self.registry.specs() + [SUBMIT_TEAM]
         cot_parts: list[str] = []
         tool_log: list[dict] = []
         in_tokens = out_tokens = 0
@@ -267,13 +338,13 @@ class AgentLoop:
                 )
 
             submit = next(
-                (c for c in resp.tool_calls if c.name == "submit_lead"), None
+                (c for c in resp.tool_calls if c.name == "submit_team"), None
             )
             if submit is not None:
-                lead, reason, error = self._validate_lead(battle, submit)
-                if lead is not None:
+                order_list, reason, error = self._validate_team(battle, submit)
+                if order_list is not None:
                     return PreviewOutcome(
-                        lead=lead,
+                        order_list=order_list,
                         reason=reason,
                         rounds=round_ + 1,
                         cot="\n\n".join(cot_parts),
@@ -281,11 +352,11 @@ class AgentLoop:
                         input_tokens=in_tokens,
                         output_tokens=out_tokens,
                     )
-                # invalid slot: let the model retry with a clear error
-                other_calls = [c for c in resp.tool_calls if c.name != "submit_lead"]
+                # invalid order: let the model retry with a clear error
+                other_calls = [c for c in resp.tool_calls if c.name != "submit_team"]
                 results = await self.registry.execute_parallel(ctx, other_calls)
                 results.append(
-                    ToolResultMessage(submit.id, "submit_lead", error, True)
+                    ToolResultMessage(submit.id, "submit_team", error, True)
                 )
                 messages.extend(results)
                 if trace:
@@ -313,34 +384,51 @@ class AgentLoop:
                 messages.append(UserMessage(NUDGE))
 
         raise PreviewAbort(
-            f"no valid lead after {config.max_tool_rounds} rounds"
+            f"no valid team order after {config.max_tool_rounds} rounds"
         )
 
-    def _validate_lead(self, battle, call: ToolCallRequest):
-        """Validate a submit_lead call against the team.
+    def _validate_team(self, battle, call: ToolCallRequest):
+        """Validate a submit_team call against the team.
 
-        Returns (lead, reason, error) — lead is None and error explains why
-        when the choice is invalid, so the model can retry.
+        Returns (order_list, reason, error) — order_list is None and error
+        explains why when the choice is invalid, so the model can retry.
         """
         args = call.arguments or {}
         reason = str(args.get("reason", "")).strip()
-        try:
-            slot = int(args.get("slot"))
-        except (TypeError, ValueError):
+        team_size = len(battle.team)
+        raw = args.get("order")
+        if not isinstance(raw, list) or not raw:
             return (
                 None,
                 reason,
-                "'slot' must be an integer between 1 and "
-                f"{len(battle.team)}.",
+                f"'order' must be a list of team slots (1-based, up to {team_size}).",
             )
-        team_list = list(battle.team.values())
-        if not 1 <= slot <= len(team_list):
-            return (
-                None,
-                reason,
-                f"'slot' must be an integer between 1 and {len(team_list)}.",
-            )
-        return slot, reason, None
+        slots: list[int] = []
+        for v in raw:
+            if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= team_size:
+                return (
+                    None,
+                    reason,
+                    f"'order' entries must be integers between 1 and {team_size}.",
+                )
+            slots.append(v)
+        if len(set(slots)) != len(slots):
+            return None, reason, "'order' contains duplicate slots."
+
+        if is_doubles(battle):
+            need = battle.max_team_size or 4
+            if len(slots) != need:
+                return (
+                    None,
+                    reason,
+                    f"this format picks {need} slots (first two are the leads) — "
+                    f"you submitted {len(slots)}.",
+                )
+        else:
+            # singles: only the lead matters; the back row keeps team order
+            lead = slots[0]
+            slots = [lead] + [i + 1 for i in range(team_size) if i + 1 != lead]
+        return slots, reason, None
 
     # --- phase 2: in-battle decision -----------------------------------------
 
@@ -350,12 +438,32 @@ class AgentLoop:
 
         self._maybe_fire_threat_analyses(battle, cm)
 
-        # no meaningful choice to make — struggle / forced default
-        if not battle.available_moves and not battle.available_switches:
+        if is_doubles(battle):
+            # poke-env guards against wait'd battles upstream; this is insurance
+            if battle.wait:
+                return TurnOutcome(
+                    order=DoubleBattleOrder(
+                        Player.choose_default_move(), Player.choose_default_move()
+                    ),
+                    decision="default:wait",
+                    reason="battle is waiting — nothing to decide",
+                    rounds=0,
+                )
+            # no meaningful choice in either slot — struggle / forced default
+            if not any(battle.available_moves) and not any(battle.available_switches):
+                return TurnOutcome(
+                    order=DoubleBattleOrder(
+                        Player.choose_default_move(), Player.choose_default_move()
+                    ),
+                    decision="default:struggle",
+                    reason="no moves or switches available",
+                    rounds=0,
+                )
+        elif not battle.available_moves and not battle.available_switches:
+            # no meaningful choice to make — struggle / forced default
             return TurnOutcome(
                 order=Player.choose_default_move(),
-                action="default",
-                target="struggle/default",
+                decision="default:struggle/default",
                 reason="no moves or switches available",
                 rounds=0,
             )
@@ -424,12 +532,11 @@ class AgentLoop:
                 (c for c in resp.tool_calls if c.name == "submit_decision"), None
             )
             if submit is not None:
-                order, action, target, reason, error = self._validate_submit(battle, submit)
+                order, decision, reason, error = self._validate_submit(battle, submit)
                 if order is not None:
                     return TurnOutcome(
                         order=order,
-                        action=action,
-                        target=target,
+                        decision=decision,
                         reason=reason,
                         rounds=round_ + 1,
                         cot="\n\n".join(cot_parts),
@@ -485,47 +592,309 @@ class AgentLoop:
     def _validate_submit(self, battle, call: ToolCallRequest):
         """Validate a submit_decision call against the legal actions.
 
-        Returns (order, action, target, reason, error) — order is None and
-        error explains why when the choice is invalid, so the model can retry.
+        Returns (order, decision, reason, error) — order is None and error
+        explains why when the choice is invalid, so the model can retry.
         """
-        args = call.arguments or {}
-        action = str(args.get("action", "")).lower()
-        target = str(args.get("target", "")).strip()
-        reason = str(args.get("reason", "")).strip()
-        tera = bool(args.get("terastallize", False))
+        if is_doubles(battle):
+            return self._validate_doubles(battle, call)
+        return self._validate_singles(battle, call)
 
-        if action == "move":
-            norm = normalize_name(target)
+    def _validate_singles(self, battle, call: ToolCallRequest):
+        """Singles: read actions[0]; the target field is ignored."""
+        args = call.arguments or {}
+        reason = str(args.get("reason", "")).strip()
+        actions = args.get("actions")
+        if not isinstance(actions, list) or not actions:
+            return (
+                None,
+                "",
+                reason,
+                "'actions' must be a non-empty list with one action object.",
+            )
+        a = actions[0]
+        if not isinstance(a, dict):
+            return None, "", reason, "actions[0] must be an object with slot/kind fields."
+        kind = str(a.get("kind", "")).lower()
+        tera = bool(a.get("terastallize", False))
+
+        if kind == "move":
+            name = str(a.get("move", "")).strip()
+            norm = normalize_name(name)
             for m in battle.available_moves:
                 if m.id == norm or normalize_name(m.id) == norm:
+                    if tera and not battle.can_tera:
+                        return (
+                            None,
+                            f"move:{m.id}",
+                            reason,
+                            "terastallization is not available right now.",
+                        )
                     return (
                         Player.create_order(m, terastallize=tera),
-                        "move",
-                        m.id,
+                        f"move:{m.id}",
                         reason,
                         None,
                     )
             available = ", ".join(m.id for m in battle.available_moves) or "none"
             return (
                 None,
-                "move",
-                target,
+                f"move:{name}",
                 reason,
-                f"Invalid move '{target}'. Available moves: {available}.",
+                f"Invalid move '{name}'. Available moves: {available}.",
             )
 
-        if action == "switch":
-            norm = normalize_name(target)
+        if kind == "switch":
+            if tera:
+                return (
+                    None,
+                    "switch",
+                    reason,
+                    "terastallize=true requires kind='move'.",
+                )
+            name = str(a.get("switch_to", "")).strip()
+            norm = normalize_name(name)
             for p in battle.available_switches:
                 if normalize_name(p.species) == norm:
-                    return (Player.create_order(p), "switch", p.species, reason, None)
-            available = ", ".join(p.species for p in battle.available_switches) or "none"
+                    return (Player.create_order(p), f"switch:{p.species}", reason, None)
+            available = (
+                ", ".join(p.species for p in battle.available_switches) or "none"
+            )
             return (
                 None,
-                "switch",
-                target,
+                f"switch:{name}",
                 reason,
-                f"Invalid switch '{target}'. Available switches: {available}.",
+                f"Invalid switch '{name}'. Available switches: {available}.",
             )
 
-        return None, action, target, reason, "action must be 'move' or 'switch'."
+        return None, kind, reason, "kind must be 'move' or 'switch' in singles."
+
+    def _validate_doubles(self, battle, call: ToolCallRequest):
+        """Doubles: one action per deciding slot, symbolic move targets.
+
+        Slots without a decision auto-pass; submitting an action for such a
+        slot, missing a deciding slot, or duplicating a slot is an error the
+        model can retry on. Switches claim bench mons in order, so two slots
+        can each switch into a different same-species mon.
+        """
+        args = call.arguments or {}
+        reason = str(args.get("reason", "")).strip()
+        raw = args.get("actions")
+        if not isinstance(raw, list) or not raw:
+            return (
+                None,
+                "",
+                reason,
+                "'actions' must be a non-empty list of action objects.",
+            )
+        if len(raw) > 2:
+            return None, "", reason, "at most 2 actions (one per active slot)."
+
+        plans = _slot_plans(battle)
+        # where the protocol allows an explicit pass (mirrors valid_orders:
+        # non-deciding slots, and both-forced-with-a-single-bench-mon)
+        passable = [self._pass_legal(battle, i) for i in range(2)]
+
+        parsed: dict[int, dict] = {}
+        claimed: list = []  # bench Pokemon objects already taken by a switch
+        tera_slot: int | None = None
+        for a in raw:
+            if not isinstance(a, dict):
+                return None, "", reason, "each action must be an object."
+            slot = a.get("slot")
+            if not isinstance(slot, int) or isinstance(slot, bool) or slot not in (1, 2):
+                return None, "", reason, "action 'slot' must be 1 or 2."
+            i = slot - 1
+            if i in parsed:
+                return None, "", reason, f"duplicate action for slot {slot}."
+            kind = str(a.get("kind", "")).lower()
+
+            if kind == "pass":
+                if not passable[i]:
+                    return (
+                        None,
+                        "",
+                        reason,
+                        f"slot {slot} cannot pass — it must choose a move or switch.",
+                    )
+                parsed[i] = {"kind": "pass"}
+                continue
+
+            if plans[i] == "pass":
+                return (
+                    None,
+                    "",
+                    reason,
+                    f"slot {slot} has no decision this round (it auto-passes) — "
+                    "remove its action.",
+                )
+
+            tera = bool(a.get("terastallize", False))
+            if kind == "move":
+                name = str(a.get("move", "")).strip()
+                norm = normalize_name(name)
+                move = next(
+                    (
+                        m
+                        for m in battle.available_moves[i]
+                        if m.id == norm or normalize_name(m.id) == norm
+                    ),
+                    None,
+                )
+                if move is None:
+                    available = (
+                        ", ".join(m.id for m in battle.available_moves[i]) or "none"
+                    )
+                    return (
+                        None,
+                        "",
+                        reason,
+                        f"slot {slot}: invalid move '{name}'. Available: {available}.",
+                    )
+                if tera:
+                    if not battle.can_tera[i]:
+                        return (
+                            None,
+                            "",
+                            reason,
+                            f"slot {slot}: terastallization is not available "
+                            "for this Pokemon.",
+                        )
+                    if tera_slot is not None:
+                        return (
+                            None,
+                            "",
+                            reason,
+                            "only one Pokemon can terastallize per turn.",
+                        )
+                    tera_slot = i
+                symbols = move_target_symbols(battle, move, i)
+                target = str(a.get("target", "")).strip().lower()
+                if target and target not in symbols:
+                    return (
+                        None,
+                        "",
+                        reason,
+                        f"slot {slot}: invalid target '{target}' for {move.id}. "
+                        f"Legal targets: {', '.join(symbols)}.",
+                    )
+                if not target:
+                    if len(symbols) == 1:
+                        target = symbols[0]
+                    else:
+                        return (
+                            None,
+                            "",
+                            reason,
+                            f"slot {slot}: {move.id} needs an explicit target. "
+                            f"Legal targets: {', '.join(symbols)}.",
+                        )
+                parsed[i] = {
+                    "kind": "move",
+                    "order": Player.create_order(
+                        move,
+                        terastallize=tera,
+                        move_target=symbol_position(target, i),
+                    ),
+                    "move": move.id,
+                    "target": target,
+                    "tera": tera,
+                }
+            elif kind == "switch":
+                if tera:
+                    return (
+                        None,
+                        "",
+                        reason,
+                        f"slot {slot}: terastallize=true requires kind='move'.",
+                    )
+                name = str(a.get("switch_to", "")).strip()
+                norm = normalize_name(name)
+                options = [
+                    p
+                    for p in battle.available_switches[i]
+                    if normalize_name(p.species) == norm and p not in claimed
+                ]
+                if not options:
+                    available = (
+                        ", ".join(p.species for p in battle.available_switches[i])
+                        or "none"
+                    )
+                    taken = ", ".join(
+                        p.species for p in claimed
+                    ) or "none"
+                    return (
+                        None,
+                        "",
+                        reason,
+                        f"slot {slot}: invalid switch '{name}' (already claimed "
+                        f"by another slot: {taken}). Available: {available}.",
+                    )
+                mon = options[0]
+                claimed.append(mon)
+                parsed[i] = {
+                    "kind": "switch",
+                    "order": Player.create_order(mon),
+                    "species": mon.species,
+                }
+            else:
+                return None, "", reason, f"slot {slot}: kind must be 'move', 'switch' or 'pass'."
+
+        # missing slots: auto-pass pass-slots; a deciding slot may be omitted
+        # only where passing is legal (both-forced with a single bench mon)
+        for i in range(2):
+            if i in parsed:
+                continue
+            if plans[i] == "pass" or passable[i]:
+                parsed[i] = {"kind": "pass"}
+            else:
+                return (
+                    None,
+                    "",
+                    reason,
+                    f"missing action for slot {i + 1}, which has choices this round.",
+                )
+
+        if all(v["kind"] == "pass" for v in parsed.values()):
+            if any(battle.force_switch):
+                return (
+                    None,
+                    "",
+                    reason,
+                    "a forced-switch slot must switch to something — pass only "
+                    "the other slot.",
+                )
+            # nothing to decide in either slot
+            return (
+                DoubleBattleOrder(
+                    Player.choose_default_move(), Player.choose_default_move()
+                ),
+                "default:struggle",
+                reason,
+                None,
+            )
+
+        order = DoubleBattleOrder(
+            parsed[0].get("order", PassBattleOrder()),
+            parsed[1].get("order", PassBattleOrder()),
+        )
+        parts: list[str] = []
+        for i in range(2):
+            v = parsed[i]
+            if v["kind"] == "pass":
+                parts.append(f"slot{i + 1}:pass")
+            elif v["kind"] == "move":
+                bits = f"slot{i + 1}:move:{v['move']}"
+                if v["target"] != "auto":
+                    bits += f"->{v['target']}"
+                if v["tera"]:
+                    bits += "+tera"
+                parts.append(bits)
+            else:
+                parts.append(f"slot{i + 1}:switch:{v['species']}")
+        return order, " | ".join(parts), reason, None
+
+    def _pass_legal(self, battle, slot_index: int) -> bool:
+        """Whether the protocol accepts an explicit pass for this slot."""
+        return any(
+            isinstance(o, PassBattleOrder) for o in battle.valid_orders[slot_index]
+        )
