@@ -17,6 +17,13 @@
  * format, which both guarantees sheets stay hidden for our battles and
  * avoids the server error the same command raises in a format without
  * the rule.
+ *
+ * The one deliberate deviation from official Reg I: the VGC Timer
+ * (55s per turn, 90s preview, 7-minute bank) is replaced by an AI-friendly
+ * one. An agentic opponent needs multiple LLM calls per turn and a human
+ * opponent needs thinking time — under the official timer both get
+ * force-moved or forfeited. Team legality is unaffected (Flat Rules etc.
+ * stay intact).
  */
 exports.Formats = [
 	{
@@ -25,7 +32,13 @@ exports.Formats = [
 		gameType: 'doubles',
 		searchShow: false,
 		bestOfDefault: true,
-		ruleset: ['Flat Rules', '!! Adjust Level = 50', 'Min Source Gen = 9', 'VGC Timer', 'Open Team Sheets', 'Limit Two Restricted'],
+		ruleset: [
+			'Flat Rules', '!! Adjust Level = 50', 'Min Source Gen = 9',
+			'Timer Starting = 1200', 'Timer Grace = 300', 'Timer Add Per Turn = 30',
+			'Timer Max Per Turn = 1200', 'Timer Max First Turn = 1200',
+			'Timeout Auto Choose', 'DC Timer Bank',
+			'Open Team Sheets', 'Limit Two Restricted',
+		],
 		restricted: ['Restricted Legendary'],
 	},
 ];
