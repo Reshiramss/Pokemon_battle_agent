@@ -23,9 +23,13 @@ from pokeagent.providers.base import (
 from pokeagent.providers.openai_provider import OpenAIProvider
 
 
-def make_provider(responses: list[Any] | None = None, exc: Exception | None = None):
+def make_provider(
+    responses: list[Any] | None = None,
+    exc: Exception | None = None,
+    **config_kwargs: Any,
+):
     """Build a provider whose client returns canned responses / raises."""
-    config = AgentConfig(base_url="http://stub/v1")
+    config = AgentConfig(base_url="http://stub/v1", **config_kwargs)
     provider = OpenAIProvider(config)
     captured: dict = {}
 
@@ -186,6 +190,28 @@ def test_complete_error_paths_never_raise():
         )
     )
     assert r.stop_reason == "error" and "content_filter" in r.error
+
+
+def test_complete_sends_reasoning_effort_only_when_configured():
+    # set -> forwarded on every call (reasoning models think less / cheaper)
+    provider, captured = make_provider(
+        [_wire_response("ok", "stop")], reasoning_effort="low"
+    )
+    asyncio.run(
+        provider.complete(
+            system="s", messages=[UserMessage("x")], tools=[], max_tokens=10
+        )
+    )
+    assert captured["reasoning_effort"] == "low"
+
+    # unset -> param not sent (endpoints without reasoning support reject it)
+    provider, captured = make_provider([_wire_response("ok", "stop")])
+    asyncio.run(
+        provider.complete(
+            system="s", messages=[UserMessage("x")], tools=[], max_tokens=10
+        )
+    )
+    assert "reasoning_effort" not in captured
 
 
 def test_complete_malformed_json_arguments_become_empty():

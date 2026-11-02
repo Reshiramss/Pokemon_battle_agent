@@ -62,6 +62,8 @@ class OpenAIProvider(LLMProvider):
             client_kwargs["base_url"] = base_url
         self._client = openai.AsyncOpenAI(**client_kwargs)
         self.model = config.model
+        # e.g. deepseek-flash "low"|"high"|"max"; None -> param not sent
+        self.reasoning_effort = getattr(config, "reasoning_effort", None)
 
     @staticmethod
     def _translate_messages(messages: list[LLMMessage]) -> list[dict]:
@@ -133,6 +135,8 @@ class OpenAIProvider(LLMProvider):
             "messages": wire_messages,
             "max_tokens": max_tokens,
         }
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
         if tools:
             kwargs["tools"] = self._translate_tools(tools)
         try:

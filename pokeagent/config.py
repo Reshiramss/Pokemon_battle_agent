@@ -22,7 +22,14 @@ class AgentConfig:
     base_url: str | None = None
     api_key: str | None = None
     subagent_model: str | None = None  # defaults to compressor_model
-    max_tokens_per_call: int = 2000
+    # Reasoning models (deepseek-flash etc.) emit hidden thinking tokens that
+    # count against max_tokens: at 2000/call a long deliberation truncates to
+    # an empty response (finish_reason "length"). Keep headroom, or lower the
+    # effort so the model thinks less.
+    max_tokens_per_call: int = 4000
+    # Passed through to OpenAI-compatible endpoints as `reasoning_effort`
+    # (deepseek-flash: low | high | max; default high). None -> not sent.
+    reasoning_effort: str | None = None
 
     # --- battle ---
     # Doubles 6-pick-4 VGC without Open Team Sheets: team preview only reveals
