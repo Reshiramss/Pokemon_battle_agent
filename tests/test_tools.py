@@ -112,12 +112,46 @@ def test_damage_calc_estimates_opponent_stats(kb: StaticKB):
     # damage range present and estimation flagged
     assert "damage" in result
     assert "defender stats estimated" in result
-    # the estimate must have been written onto the Pokemon object
-    defender = battle.opponent_team["p2: Torterra"]
-    assert defender.stats["atk"] is not None
+    # opponent max HP is Showdown's 100-point scale; the percentage must use
+    # the estimated real HP instead, marked with '~'
+    assert "% of ~" in result
+    assert "of its 100 HP" not in result
     # Fire vs Grass/Ground is 2x super effective: non-trivial damage
     lo, hi = _parse_range(result)
     assert hi > 0 and hi >= lo
+
+    # the estimate is call-scoped: the live Pokemon object stays unscouted,
+    # so a second call reports the assumption again
+    defender = battle.opponent_team["p2: Torterra"]
+    assert defender.stats["atk"] is None
+    again = asyncio.run(
+        tool.execute(ctx, attacker="Furret", defender="Torterra", move="Flamethrower")
+    )
+    assert "defender stats estimated" in again
+    assert _parse_range(again) == (lo, hi)
+
+
+def test_damage_calc_at_team_preview_species_keys():
+    """Preview opponent_team is keyed by species — identifiers must resolve."""
+    from test_preview import make_preview_double_battle
+
+    kb = StaticKB("gen9vgc2025regihidden")
+    battle = make_preview_double_battle()
+    # the real preview path keeps foes in _teampreview_opponent_team, so
+    # battle.opponent_team is keyed by species id until the battle starts
+    battle._teampreview_opponent_team = list(battle._opponent_team.values())
+    battle._opponent_team = {}
+    ctx = make_ctx(battle, kb)
+    result = asyncio.run(
+        DamageCalcTool().execute(
+            ctx, attacker="Furret", defender="Amoonguss", move="Tackle"
+        )
+    )
+    assert "tackle: furret -> amoonguss" in result
+    assert "damage" in result
+    # the live battle is untouched (no aliases/stat writes left behind)
+    assert battle._opponent_team == {}
+    assert all(v is None for v in battle.opponent_team["amoonguss"].stats.values())
 
 
 def _parse_range(result: str) -> tuple[int, int]:

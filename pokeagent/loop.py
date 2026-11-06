@@ -123,6 +123,39 @@ SUBMIT_DECISION = ToolSpec(
                 "type": "string",
                 "description": "One short sentence explaining the choice.",
             },
+            "reasoning_update": {
+                "type": "object",
+                "description": (
+                    "Optional: revise your committed plan for later turns. "
+                    "Replaces the listed fields (it does not append); omit "
+                    "fields you are not changing. Only applied when this "
+                    "decision is valid."
+                ),
+                "properties": {
+                    "win_conditions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 2,
+                        "description": "Full replacement, at most 2 short lines.",
+                    },
+                    "commitments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 3,
+                        "description": (
+                            "Full replacement, at most 3 short lines — what to "
+                            "preserve, deny, or set up."
+                        ),
+                    },
+                    "correction": {
+                        "type": "string",
+                        "description": (
+                            "One belief from earlier that was wrong, with the "
+                            "evidence that corrected it."
+                        ),
+                    },
+                },
+            },
         },
         "required": ["actions", "reason"],
     },
@@ -607,6 +640,7 @@ class AgentLoop:
             if submit is not None:
                 order, decision, reason, error = self._validate_submit(battle, submit)
                 if order is not None:
+                    self._apply_plan_update(cm, submit, battle.turn)
                     return (
                         self._turn_outcome(battle, state, order, decision, reason),
                         None,
@@ -660,6 +694,7 @@ class AgentLoop:
             if submit is not None:
                 order, decision, reason, error = self._validate_submit(battle, submit)
                 if order is not None:
+                    self._apply_plan_update(cm, submit, battle.turn)
                     return self._turn_outcome(battle, state, order, decision, reason)
                 # invalid choice: let the model retry with a clear error
                 others = [c for c in resp.tool_calls if c.name != "submit_decision"]
@@ -781,6 +816,13 @@ class AgentLoop:
                     self.on_new_opponent_mon(battle, species)
                 except Exception as e:
                     logger.warning("threat-analysis trigger failed: %s", e)
+
+    @staticmethod
+    def _apply_plan_update(cm: ContextManager, call: ToolCallRequest, turn: int) -> None:
+        """Apply an optional ``reasoning_update`` after a valid decision."""
+        update = (call.arguments or {}).get("reasoning_update")
+        if update is not None:
+            cm.apply_reasoning_update(update, turn)
 
     def _validate_submit(self, battle, call: ToolCallRequest):
         """Validate a submit_decision call against the legal actions.

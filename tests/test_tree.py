@@ -83,6 +83,25 @@ def test_refresh_binds_reveals():
     assert tree.them["torterra"].fainted is True
 
 
+def test_refresh_updates_teampreview_selection():
+    battle = make_double_battle()
+    tree = BattleKB()
+    tree.build(battle, _kb())
+    # nothing is picked while the preview decision is still being made
+    assert tree.us["furret"].selected is None
+
+    for key in ("p1: Furret", "p1: Gyarados", "p1: Pikachu 1"):
+        battle.team[key]._selected_in_teampreview = True
+    tree.refresh(battle, _kb())
+
+    assert tree.us["furret"].selected is True
+    assert tree.us["pikachu"].selected is True
+    assert tree.us["charizard"].selected is False
+    # persists into the postmortem tree
+    clone = BattleKB.from_json(tree.to_json())
+    assert clone.us["charizard"].selected is False
+
+
 def test_refresh_introduces_unseen_species():
     battle = make_double_battle()
     tree = BattleKB()

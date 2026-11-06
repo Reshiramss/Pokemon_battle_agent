@@ -23,14 +23,17 @@ from poke_env.ps_client.server_configuration import (
 )
 
 from .config import AgentConfig
+from .context.brief import LLMBriefCompressor
 from .context.compressor import LLMCompressor
 from .context.manager import ContextManager
+from .context.reasoning import DeterministicNoteExtractor, LLMNoteExtractor
 from .context.records import TurnRecord, preview_pick_count
 from .hooks.base import HookSystem
 from .knowledge.static import StaticKB
 from .knowledge.tree import BattleKB
 from .loop import AgentLoop, TurnAbort, TurnOutcome
 from .providers import get_provider
+from .state.model import BattleState
 from .providers.base import LLMProvider
 from .tasks.base import SubAgentContext
 from .tasks.runner import TaskRunner
@@ -159,13 +162,18 @@ class PokeAgent(Player):
         from .tools.static_kb import static_kb_tools
         from .tools.team_comp import TeamCompTool
 
-        return [
+        tools: list[Tool] = [
             DamageCalcTool(),
             *static_kb_tools(self.kb),
             BattleHistoryTool(),
             MechanicsInfoTool(),
             TeamCompTool(),
         ]
+        if self.config.enable_memory:
+            from .tools.memory import MemorySearchTool, MemoryStatsTool
+
+            tools.extend([MemorySearchTool(), MemoryStatsTool()])
+        return tools
 
     def _default_hooks(self) -> HookSystem:
         from .hooks.battle_kb_hook import BattleKBHook
@@ -178,6 +186,10 @@ class PokeAgent(Player):
         hooks.register_pre(TypeMatchupHook())
         hooks.register_pre(MechanicsHook())
         hooks.register_pre(SmogonUsageHook(self.config))
+        if self.config.enable_memory:
+            from .hooks.memory_hook import MemoryHook
+
+            hooks.register_pre(MemoryHook(self.config))
         return hooks
 
     # --- poke-env lifecycle ---------------------------------------------------
@@ -194,6 +206,29 @@ class PokeAgent(Player):
             # background history compression on the cheap model
             if self.runner is not None and self.runner.provider is not None:
                 cm.compressor = LLMCompressor(self.runner.provider)
+            # per-turn reasoning notes: cheap-model extraction off the
+            # critical path, deterministic fallback without a provider
+            if self.config.enable_reasoning_notes:
+                if self.runner is not None and self.runner.provider is not None:
+                    cm.note_extractor = LLMNoteExtractor(
+                        self.runner.provider,
+                        max_tokens=self.config.reasoning_note_max_tokens,
+                        input_chars=self.config.reasoning_note_input_chars,
+                    )
+                else:
+                    cm.note_extractor = DeterministicNoteExtractor()
+            # rolling strategy brief: cheap-model rewrite off the critical
+            # path; deterministic lifting when no provider exists
+            if (
+                self.config.enable_strategy_brief
+                and self.runner is not None
+                and self.runner.provider is not None
+            ):
+                cm.brief_compressor = LLMBriefCompressor(
+                    self.runner.provider,
+                    max_tokens=self.config.reasoning_brief_max_tokens,
+                    input_chars=self.config.reasoning_brief_input_chars,
+                )
             self._contexts[battle.battle_tag] = cm
         return cm
 
@@ -221,11 +256,13 @@ class PokeAgent(Player):
             return self.choose_random_move(battle)
 
         elapsed = time.monotonic() - started
+        event_rows: list[list[str]] = []
         record = TurnRecord(
             seq=0,  # assigned by record_turn
             turn=battle.turn,
             request=cm.last_now_text,
-            events=cm.new_events(battle),
+            events=cm.new_events(battle, rows_out=event_rows),
+            event_rows=event_rows,
             decision=outcome.decision,
             reason=outcome.reason,
             cot=outcome.cot or None,
@@ -241,21 +278,36 @@ class PokeAgent(Player):
         return outcome.order
 
     def _refresh_battle_kb(self, battle: "AbstractBattle", cm: ContextManager) -> None:
-        """Keep the per-battle knowledge tree current; snapshot it to disk.
+        """Keep the per-battle state current; snapshot it to disk.
 
         Built lazily (team preview, or the first turn of formats without
         preview) and refreshed from the live objects every decision point.
-        Never blocks the battle: the tree is an aid, not a dependency.
+        The explicit ``BattleState`` owns the knowledge tree — ``cm.battle_kb``
+        stays a live alias for the hooks. Never blocks the battle: state is an
+        aid, not a dependency.
         """
         try:
-            if cm.battle_kb is None:
-                cm.battle_kb = BattleKB()
-                cm.battle_kb.build(battle, self.kb)
+            if cm.state is None:
+                cm.state = BattleState.create(battle, self.kb, ledger=cm.ledger)
             else:
-                cm.battle_kb.refresh(battle, self.kb)
+                cm.state.refresh(battle, self.kb)
+            cm.battle_kb = cm.state.kb
             cm.save_battle_kb()
+            cm.save_state()
         except Exception:
-            logger.debug("battle_kb refresh failed", exc_info=True)
+            logger.debug("battle state refresh failed", exc_info=True)
+            # degrade to the tree-only path (and let [NOW] fall back to the
+            # live snapshot) rather than serving stale observed state
+            cm.state = None
+            try:
+                if cm.battle_kb is None:
+                    cm.battle_kb = BattleKB()
+                    cm.battle_kb.build(battle, self.kb)
+                else:
+                    cm.battle_kb.refresh(battle, self.kb)
+                cm.save_battle_kb()
+            except Exception:
+                logger.debug("battle_kb refresh failed", exc_info=True)
 
     async def _record_fallback(
         self, battle, cm: ContextManager, ctx: ToolContext, reason: str, started: float
@@ -266,11 +318,13 @@ class PokeAgent(Player):
             reason=reason,
             elapsed_s=round(time.monotonic() - started, 2),
         )
+        event_rows: list[list[str]] = []
         record = TurnRecord(
             seq=0,
             turn=battle.turn,
             request=cm.last_now_text or "n/a",
-            events=cm.new_events(battle),
+            events=cm.new_events(battle, rows_out=event_rows),
+            event_rows=event_rows,
             decision="random_fallback",
             reason=None,
             cot=None,
@@ -363,6 +417,18 @@ class PokeAgent(Player):
                 team_list[i - 1]._selected_in_teampreview = True
             except Exception:
                 pass
+        # record what we committed to at preview, then bind the selection
+        # back into the state tree (kb_tree.json shows picked vs unpicked)
+        if cm.state is not None:
+            cm.state.meta.preview_pick = limit
+            cm.state.meta.preview_order = list(members)
+            try:
+                cm.state.refresh(battle, self.kb)
+                cm.battle_kb = cm.state.kb
+                cm.save_battle_kb()
+                cm.save_state()
+            except Exception:
+                logger.debug("state preview refresh failed", exc_info=True)
         cm.log_event(
             "team_preview",
             leads=members[:2],
@@ -385,12 +451,22 @@ class PokeAgent(Player):
             won=bool(getattr(battle, "won", False)),
             lost=bool(getattr(battle, "lost", False)),
         )
+        writer = None
+        if self.config.enable_memory:
+            from .memory.writer import MemoryWriter
+
+            writer = MemoryWriter(self.config)
+            counts = writer.write_battle(battle, cm)
+            cm.log_event("memory_written", **counts)
         if self.runner is not None:
             # cancel stale in-battle analyses first, THEN submit the review
             self.runner.cancel_battle(battle.battle_tag)
+            inputs = {"context_manager": cm}
+            if writer is not None:
+                inputs["memory_writer"] = writer
             sctx = SubAgentContext(
                 battle=battle, kb=self.kb, intel=cm.intel,
-                inputs={"context_manager": cm},
+                inputs=inputs,
             )
             self.runner.submit(
                 battle.battle_tag, "post_battle", sctx, cm=cm,

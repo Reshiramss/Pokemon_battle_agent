@@ -1,7 +1,9 @@
 """Anthropic Claude provider (default backend).
 
-Credentials come from the environment: ANTHROPIC_API_KEY (required) and
-ANTHROPIC_BASE_URL (optional, e.g. an internal gateway).
+Credentials come from the environment: ANTHROPIC_API_KEY (sent as x-api-key)
+or ANTHROPIC_AUTH_TOKEN (sent as ``Authorization: Bearer`` — required by some
+gateways that reject x-api-key). ANTHROPIC_BASE_URL or ``base_url`` in the
+config file can point at a gateway.
 """
 
 from __future__ import annotations
@@ -35,14 +37,22 @@ class AnthropicProvider(LLMProvider):
     ):
         import anthropic
 
-        api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
+        api_key = api_key or config.api_key or os.environ.get("ANTHROPIC_API_KEY")
+        auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        if not api_key and not auth_token:
             raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set. Export it (or ANTHROPIC_BASE_URL "
-                "if you use a gateway) before starting the agent."
+                "No Anthropic credentials. Export ANTHROPIC_API_KEY (x-api-key) "
+                "or ANTHROPIC_AUTH_TOKEN (Bearer — some gateways require this), "
+                "and ANTHROPIC_BASE_URL if you use a gateway."
             )
-        client_kwargs: dict = {"api_key": api_key, "timeout": timeout}
-        base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL")
+        client_kwargs: dict = {"timeout": timeout}
+        if auth_token:
+            # Bearer wins when both are present: gateways that reject
+            # x-api-key would otherwise fail with a 401 even with a good key.
+            client_kwargs["auth_token"] = auth_token
+        else:
+            client_kwargs["api_key"] = api_key
+        base_url = base_url or config.base_url or os.environ.get("ANTHROPIC_BASE_URL")
         if base_url:
             client_kwargs["base_url"] = base_url
         self._client = anthropic.AsyncAnthropic(**client_kwargs)
