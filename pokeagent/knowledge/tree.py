@@ -39,6 +39,14 @@ class MonNode:
     terastallized: bool = False
     fainted: bool = False
     selected: bool | None = None  # picked in team preview (None = singles)
+    # current battle state, bound from the live object on every refresh.
+    # ``hp_fraction`` is None for opponent preview stubs (nothing revealed);
+    # ``item_raw`` keeps Showdown's "unknown_item'' sentinel so the rendered
+    # board text stays byte-compatible with records.snapshot.
+    hp_fraction: float | None = None
+    status: str | None = None  # Status enum name ("BRN", "FNT", ...)
+    boosts: dict[str, int] = field(default_factory=dict)
+    item_raw: str | None = None
     # own side only (opponent stats are never visible)
     stats: dict[str, int] | None = None
     moves: list[str] | None = None
@@ -110,13 +118,22 @@ class BattleKB:
     # --- construction ------------------------------------------------------
 
     def build(self, battle: "AbstractBattle", kb=None) -> None:
-        """Preview-time build: own side full, opponent stubbed to species."""
+        """Preview-time build: own side full, opponent stubbed to species.
+
+        During team preview an opponent's HP is not information we have —
+        the stub keeps ``hp_fraction=None`` instead of Showdown's internal
+        zero, so nothing downstream mistakes it for a fainted mon.
+        """
         self.us.clear()
         self.them.clear()
+        preview = self._preview_selected(battle)
+        preview_foes = bool(getattr(battle, "teampreview", False))
         for mon in battle.team.values():
-            self.us[mon.species] = self._own_node(mon)
+            self.us[mon.species] = self._own_node(mon, preview=preview)
         for mon in battle.opponent_team.values():
-            self.them[mon.species] = self._foe_node(mon, kb)
+            self.them[mon.species] = self._foe_node(
+                mon, kb, hidden_hp=preview_foes
+            )
 
     def refresh(self, battle: "AbstractBattle", kb=None) -> None:
         """Bind the latest revealed state back into the tree.
@@ -125,26 +142,82 @@ class BattleKB:
         opponent's mon entering without a preview build, late substitutions
         in formats without preview) — those get nodes on the fly.
         """
+        preview = self._preview_selected(battle)
         for mon in battle.team.values():
-            self._refresh_own(mon)
+            self._refresh_own(mon, preview=preview)
         for mon in battle.opponent_team.values():
             self._refresh_foe(mon, kb)
 
     # --- node factories / updaters ---------------------------------------
 
-    def _own_node(self, mon) -> MonNode:
+    @staticmethod
+    def _preview_selected(battle: "AbstractBattle") -> bool:
+        """True once a team preview has marked which mons were brought."""
+        return any(
+            getattr(p, "_selected_in_teampreview", False)
+            for p in battle.team.values()
+        )
+
+    @staticmethod
+    def _bind_common(node: MonNode, mon, *, hidden_hp: bool = False) -> None:
+        """Bind the per-turn visible state shared by both sides.
+
+        Everything here is an *observation* from the live object; it never
+        invents opponent data. ``hidden_hp`` covers the team-preview stubs,
+        where Showdown reports 0 HP that does not mean "fainted".
+        """
+        node.level = mon.level
+        try:
+            node.types = [_tname(t) for t in mon.types]
+        except Exception:
+            pass
+        node.fainted = bool(mon.fainted)
+        if hidden_hp:
+            node.hp_fraction = None
+        else:
+            try:
+                node.hp_fraction = float(mon.current_hp_fraction)
+            except Exception:
+                node.hp_fraction = None
+        status = getattr(mon, "status", None)
+        node.status = _tname(status) if status else None
+        try:
+            node.boosts = {
+                str(_tname(k)): int(v)
+                for k, v in dict(mon.boosts).items()
+                if v
+            }
+        except Exception:
+            node.boosts = {}
+        node.item_raw = getattr(mon, "item", None)
+        ability = getattr(mon, "ability", None)
+        if ability:
+            node.known_ability = str(ability)
+        if getattr(mon, "is_terastallized", False):
+            node.terastallized = True
+            if getattr(mon, "tera_type", None):
+                node.tera_type = _tname(mon.tera_type)
+        elif getattr(mon, "tera_type", None):
+            node.tera_type = _tname(mon.tera_type)
+
+    def _own_node(self, mon, *, preview: bool = False) -> MonNode:
         entry = _static_entry(mon.species)
         node = MonNode(
             species=mon.species,
             side="us",
-            level=mon.level,
-            types=[_tname(t) for t in mon.types],
-            base_stats=dict(entry.get("baseStats") or {}),
+            base_stats=dict(
+                entry.get("baseStats")
+                or getattr(mon, "base_stats", {})
+                or {}
+            ),
             possible_abilities=_possible_abilities(entry),
-            known_ability=str(mon.ability) if mon.ability else None,
-            fainted=mon.fainted,
-            selected=getattr(mon, "_selected_in_teampreview", None),
+            selected=(
+                bool(getattr(mon, "_selected_in_teampreview", False))
+                if preview
+                else None
+            ),
         )
+        self._bind_common(node, mon)
         # stats only exist once the preview request carries the actual spread;
         # a lazy build can catch mons whose details have not arrived yet
         try:
@@ -158,61 +231,59 @@ class BattleKB:
             node.moves = sorted(mon.moves)
         item = getattr(mon, "item", None)
         node.item = item if item and item != "unknown_item" else None
-        if getattr(mon, "is_terastallized", False):
-            node.terastallized = True
-            if mon.tera_type:
-                node.tera_type = _tname(mon.tera_type)
         return node
 
-    def _refresh_own(self, mon) -> None:
+    def _refresh_own(self, mon, *, preview: bool = False) -> None:
         node = self.us.get(mon.species)
         if node is None:
-            self.us[mon.species] = node = self._own_node(mon)
+            self.us[mon.species] = node = self._own_node(mon, preview=preview)
             return
-        node.fainted = mon.fainted
+        self._bind_common(node, mon)
+        if preview:
+            node.selected = bool(getattr(mon, "_selected_in_teampreview", False))
         if mon.moves:
             node.moves = sorted(mon.moves)
-        if mon.ability:
-            node.known_ability = str(mon.ability)
-        if getattr(mon, "is_terastallized", False):
-            node.terastallized = True
-            if mon.tera_type:
-                node.tera_type = _tname(mon.tera_type)
+        try:
+            stats = {
+                k: v for k, v in dict(mon.stats).items() if isinstance(v, int)
+            }
+            if stats:
+                node.stats = stats
+        except Exception:
+            pass
+        item = getattr(mon, "item", None)
+        if item and item != "unknown_item":
+            node.item = item
 
-    def _foe_node(self, mon, kb=None) -> MonNode:
+    def _foe_node(self, mon, kb=None, *, hidden_hp: bool = False) -> MonNode:
         entry = _static_entry(mon.species, kb)
-        return MonNode(
+        node = MonNode(
             species=mon.species,
             side="them",
-            level=mon.level,
-            types=[_tname(t) for t in mon.types],
-            base_stats=dict(entry.get("baseStats") or {}),
+            base_stats=dict(
+                entry.get("baseStats")
+                or getattr(mon, "base_stats", {})
+                or {}
+            ),
             possible_abilities=_possible_abilities(entry),
-            known_ability=str(mon.ability) if mon.ability else None,
             revealed_moves=sorted(mon.moves) if mon.moves else [],
-            fainted=mon.fainted,
         )
+        self._bind_common(node, mon, hidden_hp=hidden_hp)
+        item = getattr(mon, "item", None)
+        node.item = item if item and item != "unknown_item" else None
+        return node
 
     def _refresh_foe(self, mon, kb=None) -> None:
         node = self.them.get(mon.species)
         if node is None:
-            self.them[mon.species] = self._foe_node(mon, kb)
+            self.them[mon.species] = node = self._foe_node(mon, kb)
             return
-        node.fainted = mon.fainted
+        self._bind_common(node, mon)
         if mon.moves:
             node.revealed_moves = sorted(mon.moves)
-        ability = mon.ability
-        if ability:
-            node.known_ability = str(ability)
         item = getattr(mon, "item", None)
         if item and item != "unknown_item":
             node.item = item
-        if getattr(mon, "is_terastallized", False):
-            node.terastallized = True
-            if mon.tera_type:
-                node.tera_type = _tname(mon.tera_type)
-        elif getattr(mon, "tera_type", None):
-            node.tera_type = _tname(mon.tera_type)
 
     # --- access ------------------------------------------------------------
 

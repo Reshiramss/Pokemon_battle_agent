@@ -70,9 +70,15 @@ def test_full_doubles_battle_two_agents(tmp_path):
     assert agent.n_finished_battles == 1
     assert agent.n_won_battles + opponent.n_won_battles == 1
 
-    # two separate run dirs (same battle tag, different usernames)
-    run_dirs = sorted((tmp_path / "runs").iterdir())
+    # two separate run dirs (same battle tag, different usernames); the
+    # cross-battle memory root also lives under runs/ and is not a run
+    run_dirs = sorted(
+        d for d in (tmp_path / "runs").iterdir() if not d.name.startswith("_")
+    )
     assert len(run_dirs) == 2
+    memory_root = tmp_path / "runs" / "_memory"
+    assert memory_root.is_dir()
+    assert any((memory_root / level).glob("*.jsonl") for level in ("species", "battles"))
     events = {
         d.name: [
             json.loads(line)

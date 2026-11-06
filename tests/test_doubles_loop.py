@@ -572,6 +572,26 @@ def test_doubles_snapshot_and_actions_rendering():
     assert "Slot 2 (gyarados):" in actions
 
 
+def test_snapshot_marks_unpicked_mons():
+    battle = make_double_battle()
+    # simulate a completed preview: two actives brought, one bench mon picked,
+    # one left out (VGC 6-pick-4)
+    for key in ("p1: Furret", "p1: Gyarados", "p1: Pikachu 1"):
+        battle.team[key]._selected_in_teampreview = True
+
+    snap = snapshot(battle)
+    assert "Your team (* active, + picked bench, - not picked):" in snap
+    assert "* furret" in snap
+    assert "+ pikachu" in snap
+    assert "- charizard" in snap
+    assert "[NOT PICKED — unavailable this battle]" in snap
+
+    # without preview flags (random battles) the legacy rendering stays
+    plain = snapshot(make_double_battle())
+    assert "Your team: " in plain
+    assert "NOT PICKED" not in plain
+
+
 def test_doubles_forced_switch_rendering():
     battle = make_double_battle(force_switch=(True, False), fainted=(True, False))
     actions = available_actions(battle)

@@ -5,7 +5,7 @@ provider = "openai"                            # openai | anthropic
 model = "your-model-name"
 # compressor_model = "your-cheap-model"        # background compression / reviews; defaults to model
 # base_url = "https://api.example.com/v1"      # OpenAI-compatible endpoint; unset -> OPENAI_BASE_URL
-# api_key = "sk-..."                           # unset -> OPENAI_API_KEY env var
+# api_key = "sk-..."                           # unset -> OPENAI_API_KEY (openai) / ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN (anthropic)
 # max_tokens_per_call = 4000                   # reasoning models need headroom for hidden thinking tokens
 # reasoning_effort = "low"                     # deepseek-flash: low|high|max; unset -> not sent (model default)
 # battle_format = "gen9vgc2025regihidden"       # default: doubles VGC 6-pick-4, no team sheets
@@ -15,6 +15,21 @@ model = "your-model-name"
 server_port = 8964                             # must match your Showdown server
 # turn_budget = 45.0                            # hard per-turn wall clock (seconds)
 # runs_dir = "runs"
+# --- reasoning memory (harness state; see docs/harness_state.md) ---
+# enable_reasoning_notes = true                 # per-turn CoT -> structured note for [REFLECTION]
+# reasoning_note_input_chars = 6000             # CoT chars sent to the note model
+# reasoning_note_max_tokens = 350
+# enable_strategy_brief = true                  # rolling [STRATEGY] brief rewritten by the cheap model
+# reasoning_brief_every = 2                     # rewrite after this many new notes (one in flight)
+# reasoning_brief_input_chars = 4000            # brief-model input budget
+# reasoning_brief_max_tokens = 400
+# --- cross-battle memory (layered JSONL + grep retrieval) ---
+# enable_memory = true                          # write finished battles and expose memory tools/hook
+# memory_dir = "runs/_memory"                   # default: <runs_dir>/_memory
+# memory_lines_cap = 500                        # rows kept per key file (older rows are compacted)
+# memory_hook_max_lines = 3                     # [MEMORY] fragment: newest rows per matchup key
+# memory_hook_chars = 250                       # [MEMORY] fragment character budget
+# memory_search_limit = 8                       # default memory_search result count
 # --- Smogon usage stats (offline snapshot; see scripts/fetch_usage_snapshot.py) ---
 # smogon_stats_snapshot = "pokeagent/data/usage/2026-10/gen9vgc2025regi-0.json.gz"
 # smogon_stats_format = "gen9vgc2025regi"       # real ladder id; never the hidden format

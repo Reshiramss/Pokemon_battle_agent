@@ -1,14 +1,20 @@
 """Damage calculation tool over poke-env's gen9 calculator.
 
 Wraps ``poke_env.calc.damage_calc_gen9.calculate_damage``. Opponent stats
-are often unknown (random battles); missing stats are estimated with the
-standard even spread (85 EVs / 31 IVs / neutral nature) and the assumption
-is labeled in the result. The calculator handles type effectiveness, STAB,
-boosts, items and abilities to the extent battle state reveals them.
+are often unknown (random battles, and every format before the opponent's
+set is scouted); missing stats are estimated with the even spread (85 EVs /
+31 IVs / neutral nature), used only for the duration of the calculation and
+labelled in the result — nothing is written back onto the live Pokemon.
+
+Damage is reported in HP points; percentages are taken over the defender's
+**real** HP when it is ours, or over an estimated HP (prefixed ``~``) for an
+opponent, because Showdown only sends opponents' HP as a percentage.
 """
 
 from __future__ import annotations
 
+import copy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from poke_env.battle import DoubleBattle, Move
@@ -28,14 +34,25 @@ STAT_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"]
 SPREAD_TARGETS = {"ALL_ADJACENT", "ALL_ADJACENT_FOES"}
 
 
+@dataclass(frozen=True)
+class _ResolvedMon:
+    """A Pokemon plus the identifier the calculator can resolve it by."""
+
+    identifier: str
+    pokemon: "Pokemon"
+    side: str  # "us" | "them"
+
+
 class DamageCalcTool(Tool):
     name = "damage_calc"
     description = (
         "Calculate the damage roll range (min-max, in HP points) of one move "
-        "between two Pokemon currently in this battle, either direction. "
-        "Identify Pokemon by species or nickname (e.g. 'Furret', 'Charizard'). "
-        "Handles type effectiveness and STAB; unknown opponent stats are "
-        "estimated and flagged in the result."
+        "between two Pokemon currently in this battle, either direction — "
+        "works during team preview too. Identify Pokemon by species or "
+        "nickname (e.g. 'Furret', 'Charizard'). Handles type effectiveness "
+        "and STAB. Opponent EVs are hidden: their stats and HP are estimated, "
+        "flagged in the result, and percentages use '~N HP' for an estimated "
+        "max HP."
     )
     input_schema = {
         "type": "object",
@@ -80,62 +97,75 @@ class DamageCalcTool(Tool):
         if dfn is None:
             raise ToolError(f"defender '{defender}' not found in this battle")
 
-        move_obj = self._resolve_move(ctx, atk[1], move)
-        atk_estimated = self._ensure_stats(atk[1], ctx)
-        dfn_estimated = self._ensure_stats(dfn[1], ctx)
+        move_obj = self._resolve_move(ctx, atk.pokemon, move)
 
-        missing = [
-            f"{p.species}:{k}"
-            for p in (atk[1], dfn[1])
-            for k, v in (p.stats or {}).items()
-            if v is None
-        ]
-        if missing:
-            raise ToolError(
-                f"stats still unknown after estimation: {', '.join(missing)}"
-            )
-
+        # estimates are scoped to this call: filling them in permanently would
+        # make later calls report guessed stats as if they were known
+        atk_filled = self._fill_stats(atk.pokemon, ctx)
+        dfn_filled = self._fill_stats(dfn.pokemon, ctx)
+        # read the denominator while the estimates are still in place
+        hp_stat = dfn.pokemon.stats.get("hp")
+        hp_estimated = "hp" in dfn_filled
         try:
-            min_dmg, max_dmg = calculate_damage(
-                atk[0],
-                dfn[0],
-                move_obj,
-                battle,
-                is_critical=critical,
-            )
-        except Exception as e:
-            raise ToolError(
-                f"damage calc failed for {move_obj.id} "
-                f"({atk[1].species} -> {dfn[1].species}): {e}"
-            ) from e
+            missing = [
+                f"{p.species}:{k}"
+                for p in (atk.pokemon, dfn.pokemon)
+                for k, v in (p.stats or {}).items()
+                if v is None
+            ]
+            if missing:
+                raise ToolError(
+                    f"stats still unknown after estimation: {', '.join(missing)}"
+                )
+            calc_battle = self._battle_for_calc(battle, (atk, dfn))
+            try:
+                min_dmg, max_dmg = calculate_damage(
+                    atk.identifier,
+                    dfn.identifier,
+                    move_obj,
+                    calc_battle,
+                    is_critical=critical,
+                )
+            except Exception as e:
+                raise ToolError(
+                    f"damage calc failed for {move_obj.id} "
+                    f"({atk.pokemon.species} -> {dfn.pokemon.species}): {e}"
+                ) from e
+        finally:
+            self._restore_stats(atk.pokemon, atk_filled)
+            self._restore_stats(dfn.pokemon, dfn_filled)
 
-        try:
-            max_hp = dfn[1].max_hp
+        # Percent denominator: opponents' max_hp is Showdown's 100-point
+        # percentage scale, not real HP, so use the estimated HP stat and mark
+        # it with '~'. For our own Pokemon the stat is exact.
+        percent = ""
+        if hp_stat:
+            hp_label = f"~{hp_stat}" if hp_estimated else f"{hp_stat}"
             percent = (
-                f" ({min_dmg / max_hp * 100:.0f}-{max_dmg / max_hp * 100:.0f}%"
-                f" of its {max_hp} HP)"
+                f" ({min_dmg / hp_stat * 100:.0f}-{max_dmg / hp_stat * 100:.0f}%"
+                f" of {hp_label} HP)"
             )
-        except Exception:
-            percent = ""
 
         flags = []
-        if atk_estimated:
+        if atk_filled:
             flags.append("attacker stats estimated")
-        if dfn_estimated:
+        if dfn_filled:
             flags.append("defender stats estimated")
+        if hp_estimated:
+            flags.append(f"opponent HP ~{hp_stat} HP (EVs unknown)")
         if critical:
             flags.append("assumed critical hit")
 
         # doubles spread moves (e.g. Earthquake) hit 2+ targets at 0.75x —
         # poke-env's calculator does not apply the reduction
-        spread = self._is_spread_hit(battle, atk[1], move_obj)
+        spread = self._is_spread_hit(battle, atk.pokemon, move_obj)
         if spread:
             min_dmg = max(1, round(min_dmg * 0.75))
             max_dmg = max(1, round(max_dmg * 0.75))
             flags.append("spread-adjusted estimate: x0.75, move hits 2+ targets")
         note = (" Assumptions: " + "; ".join(flags) + ".") if flags else ""
         return (
-            f"{move_obj.id}: {atk[1].species} -> {dfn[1].species}: "
+            f"{move_obj.id}: {atk.pokemon.species} -> {dfn.pokemon.species}: "
             f"{min_dmg}-{max_dmg} damage{percent}.{note}"
         )
 
@@ -163,25 +193,60 @@ class DamageCalcTool(Tool):
             ]
         return len(hits) >= 2
 
-    def _find(self, ctx: ToolContext, name: str):
-        """Resolve a name to (identifier, Pokemon) among both teams.
+    def _find(self, ctx: ToolContext, name: str) -> _ResolvedMon | None:
+        """Resolve a name to a Pokemon and a calculator-safe identifier.
 
-        The identifier is the battle-team dict key (e.g. 'p1: Nickname'),
-        which is exactly what ``battle.get_pokemon`` expects.
+        During team preview ``battle.opponent_team`` is keyed by species
+        (``calyrexice``), not by identifier; passing such a key to
+        ``battle.get_pokemon`` mangles it and raises. Build the canonical
+        ``p2: Species`` identifier instead (resolved via an alias in
+        ``_battle_for_calc``).
         """
         battle = ctx.battle
         query = name.strip()
         if ":" in query:
             query = query.split(":", 1)[1].strip()
         norm = normalize_name(query)
-        for team in (battle.team, battle.opponent_team):
+        for side, team in (("us", battle.team), ("them", battle.opponent_team)):
             for key, p in team.items():
                 if (
                     normalize_name(p.species) == norm
                     or normalize_name(p.name) == norm
                 ):
-                    return key, p
+                    return _ResolvedMon(self._identifier(battle, key, p, side), p, side)
         return None
+
+    @staticmethod
+    def _identifier(battle: "AbstractBattle", key: str, pokemon: "Pokemon", side: str) -> str:
+        """Canonical ``pN: Name`` identifier for a battle-team entry."""
+        role = battle.player_role if side == "us" else (battle.opponent_role or "p2")
+        if role and key.startswith(role + ":"):
+            return key
+        return f"{role or ('p2' if side == 'them' else 'p1')}: {pokemon.species}"
+
+    def _battle_for_calc(
+        self, battle: "AbstractBattle", resolved: tuple[_ResolvedMon, ...]
+    ) -> "AbstractBattle":
+        """Battle object where every identifier resolves to the intended mon.
+
+        Preview-time opponent keys are species, so the canonical identifier
+        is not present in the team dicts. Shallow-copy the battle, copy both
+        team dicts and insert aliases — the live battle is never mutated.
+        """
+        aliases = []
+        for mon in resolved:
+            team = battle._team if mon.side == "us" else battle._opponent_team
+            if mon.identifier not in team:
+                aliases.append(mon)
+        if not aliases:
+            return battle
+        clone = copy.copy(battle)
+        clone._team = dict(battle._team)
+        clone._opponent_team = dict(battle._opponent_team)
+        for mon in aliases:
+            team = clone._team if mon.side == "us" else clone._opponent_team
+            team[mon.identifier] = mon.pokemon
+        return clone
 
     def _resolve_move(self, ctx: ToolContext, pokemon: "Pokemon", move: str) -> Move:
         """Known move of the pokemon, else any legal move by name."""
@@ -200,24 +265,29 @@ class DamageCalcTool(Tool):
             + (f" (known moves: {known_moves})" if known_moves else "")
         )
 
-    def _ensure_stats(self, pokemon: "Pokemon", ctx: ToolContext) -> bool:
-        """Fill missing stats with even-spread estimates.
+    def _fill_stats(self, pokemon: "Pokemon", ctx: ToolContext) -> dict[str, int | None]:
+        """Temporarily fill missing stats with even-spread estimates.
 
-        Returns True if any stat was filled (so the result can flag the
-        assumption). Pokemon uses __slots__, so the flag cannot live on the
-        Pokemon object itself.
+        Returns the original values (``None``) per filled key so the caller
+        can restore them in ``finally``. Keeping the mutation call-scoped is
+        what makes the "estimated" flag truthful on every later call.
         """
         stats = pokemon.stats or {}
         if not any(v is None for v in stats.values()):
-            return False
+            return {}
         if ctx.kb is None:
-            return False
+            return {}
         estimates = ctx.kb.estimate_stats(pokemon.species, pokemon.level)
         if not estimates:
-            return False
-        filled = False
+            return {}
+        originals: dict[str, int | None] = {}
         for key, value in stats.items():
             if value is None and key in estimates:
-                pokemon.stats[key] = estimates[key]
-                filled = True
-        return filled
+                originals[key] = value
+                stats[key] = estimates[key]
+        return originals
+
+    @staticmethod
+    def _restore_stats(pokemon: "Pokemon", originals: dict[str, int | None]) -> None:
+        for key, value in originals.items():
+            pokemon.stats[key] = value

@@ -73,7 +73,9 @@ def test_full_battle_offline_stub(tmp_path):
     assert agent.n_won_battles in (0, 1)
 
     # every decision was logged with decision + reason + CoT, no fallbacks
-    run_dirs = list((tmp_path / "runs").iterdir())
+    run_dirs = [
+        d for d in (tmp_path / "runs").iterdir() if not d.name.startswith("_")
+    ]
     assert len(run_dirs) == 1
     events = [
         json.loads(l)

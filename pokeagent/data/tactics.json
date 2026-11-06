@@ -1,0 +1,70 @@
+{
+  "perish_trap": {
+    "label": "Perish Song trap",
+    "mode": "all",
+    "moves": ["perishsong"],
+    "abilities": ["shadowtag", "arenatrap", "magnetpull"]
+  },
+  "trick_room": {
+    "label": "Trick Room",
+    "moves": ["trickroom"]
+  },
+  "tailwind": {
+    "label": "Tailwind offense",
+    "moves": ["tailwind"]
+  },
+  "rain": {
+    "label": "Rain team",
+    "moves": ["raindance"],
+    "abilities": ["drizzle", "swiftswim", "hydration", "raindish"]
+  },
+  "sun": {
+    "label": "Sun team",
+    "moves": ["sunnyday"],
+    "abilities": ["drought", "chlorophyll", "solarpower", "protosynthesis"]
+  },
+  "sand": {
+    "label": "Sand team",
+    "moves": ["sandstorm"],
+    "abilities": ["sandstream", "sandrush", "sandforce", "sandveil"]
+  },
+  "snow": {
+    "label": "Snow team",
+    "moves": ["snowscape"],
+    "abilities": ["snowwarning", "slushrush", "icebody", "snowcloak"]
+  },
+  "weather_speed": {
+    "label": "Weather speed control",
+    "abilities": ["swiftswim", "chlorophyll", "sandrush", "slushrush"]
+  },
+  "fake_out": {
+    "label": "Fake Out pressure",
+    "moves": ["fakeout"]
+  },
+  "redirection": {
+    "label": "Redirection support",
+    "moves": ["followme", "ragepowder"]
+  },
+  "intimidate_cycle": {
+    "label": "Intimidate cycle",
+    "mode": "all",
+    "abilities": ["intimidate"],
+    "moves": ["partingshot", "uturn", "flipturn", "voltswitch"]
+  },
+  "screens": {
+    "label": "Screens / Aurora Veil",
+    "moves": ["lightscreen", "reflect", "auroraveil"]
+  },
+  "hazard_stack": {
+    "label": "Hazard stacking",
+    "moves": ["stealthrock", "spikes", "toxicspikes", "stickyweb"]
+  },
+  "wide_guard": {
+    "label": "Guard support",
+    "moves": ["wideguard", "quickguard"]
+  },
+  "tera_sweeper": {
+    "label": "Tera sweeper",
+    "moves": ["swordsdance", "nastyplot", "dragondance", "calmmind", "bulkup"]
+  }
+}

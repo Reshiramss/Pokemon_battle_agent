@@ -64,6 +64,23 @@ class AgentConfig:
     compression_trigger_tokens: int = 8_000  # history size that triggers compression
     summary_token_budget: int = 800
 
+    # --- reasoning notes (harness memory layer) ---
+    # Raw CoT stays in llm.jsonl; each turn additionally yields a compact
+    # structured note used by [REFLECTION]. With sub-agents disabled the
+    # deterministic extractor runs instead (no extra model calls).
+    enable_reasoning_notes: bool = True
+    reasoning_note_input_chars: int = 6000  # CoT chars passed to the note model
+    reasoning_note_max_tokens: int = 350
+
+    # --- rolling strategy brief (L2) ---
+    # Every ``reasoning_brief_every`` new notes, a background model call
+    # rewrites the brief in a fixed JSON schema ([STRATEGY] in the prompt).
+    # Without a provider the deterministic brief lifts the plan/directives.
+    enable_strategy_brief: bool = True
+    reasoning_brief_every: int = 2
+    reasoning_brief_input_chars: int = 4000
+    reasoning_brief_max_tokens: int = 400
+
     # --- sub-agents ---
     # False -> the agent runs without the background TaskRunner entirely
     # (no cheap-model provider, no threat analyses/reviews) — used for the
@@ -85,6 +102,17 @@ class AgentConfig:
     # default so battles never stall on a machine without internet
     smogon_stats_fetch: bool = False
 
+    # --- cross-battle memory (S4) ---
+    # Finished battles are written to layered JSONL under runs/_memory/
+    # (species / teams / tactics / battles). Retrieval is grep-style only —
+    # no embeddings — via the memory hook and the memory tools.
+    enable_memory: bool = True
+    memory_dir: Path | None = None  # defaults to <runs_dir>/_memory
+    memory_lines_cap: int = 500  # rows kept per file
+    memory_hook_chars: int = 250  # prompt budget for the memory fragment
+    memory_hook_max_lines: int = 3
+    memory_search_limit: int = 8
+
     # --- misc ---
     poke_env_log_level: str = "WARNING"
     # run logs: per-invocation file log under runs/logs/, plus the per-battle
@@ -99,6 +127,10 @@ class AgentConfig:
     @property
     def effective_subagent_model(self) -> str:
         return self.subagent_model or self.compressor_model
+
+    @property
+    def memory_path(self) -> Path:
+        return Path(self.memory_dir) if self.memory_dir else Path(self.runs_dir) / "_memory"
 
 
 def _discover_config() -> Path | None:
@@ -134,4 +166,6 @@ def load_config(
     if overrides:
         config = replace(config, **overrides)
     config.runs_dir = Path(config.runs_dir)
+    if config.memory_dir is not None:
+        config.memory_dir = Path(config.memory_dir)
     return config

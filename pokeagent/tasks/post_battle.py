@@ -68,4 +68,25 @@ class PostBattleReviewAgent(SubAgent):
         if response.stop_reason == "error":
             logger.warning("post-battle review provider error: %s", response.error)
             return ""
-        return response.text or ""
+        text = response.text or ""
+        self._remember(sctx, cm, battle, text)
+        return text
+
+    @staticmethod
+    def _remember(sctx: SubAgentContext, cm: "ContextManager", battle, text: str) -> None:
+        """Route the review's insights into cross-battle memory."""
+        if not text:
+            return
+        try:
+            writer = sctx.inputs.get("memory_writer")
+            if writer is None:
+                config = getattr(cm, "config", None)
+                if config is None or not getattr(config, "enable_memory", False):
+                    return
+                from ..memory.writer import MemoryWriter
+
+                writer = MemoryWriter(config)
+            counts = writer.write_digest(battle, cm, text)
+            cm.log_event("memory_digest_written", **counts)
+        except Exception as exc:  # memory must never break the review
+            logger.warning("memory digest failed: %s", exc)

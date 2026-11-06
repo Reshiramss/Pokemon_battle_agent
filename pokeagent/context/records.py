@@ -94,6 +94,19 @@ def move_target_symbols(battle: DoubleBattle, move, slot_index: int) -> list[str
     ]
 
 
+def _preview_selection_known(battle: "AbstractBattle") -> bool:
+    """True once a team preview has marked which mons were brought.
+
+    Random battles never run a preview (all flags stay False); standard
+    singles mark every team member, so this only changes the rendering
+    where the format actually restricts who can be sent out.
+    """
+    return any(
+        getattr(p, "_selected_in_teampreview", False)
+        for p in battle.team.values()
+    )
+
+
 def _speed_estimate(p) -> int:
     """Level-50 speed estimate from base stats (31 IV, 0 EV, neutral nature).
 
@@ -161,11 +174,31 @@ def snapshot(battle: "AbstractBattle") -> str:
         actives = (
             set(battle.active_pokemon) if is_doubles(battle) else {battle.active_pokemon}
         )
+        # After a pick-N preview (VGC 6-pick-4), only the picked mons can ever
+        # be sent out. Without this distinction a full-HP benched mon reads
+        # like a normal back-row Pokemon, which has misled win-condition
+        # reasoning before. poke-env marks every brought mon selected in
+        # singles previews, so '-' only appears where picks are restricted.
+        selection_known = _preview_selection_known(battle)
         team_bits = []
         for p in battle.team.values():
-            marker = "*" if p in actives else "-"
-            team_bits.append(f"{marker} {describe_pokemon(p)}")
-        lines.append("Your team: " + " | ".join(team_bits))
+            selected = getattr(p, "_selected_in_teampreview", False)
+            if p in actives:
+                marker = "*"
+            elif selection_known and selected:
+                marker = "+"
+            else:
+                marker = "-"
+            line = f"{marker} {describe_pokemon(p)}"
+            if selection_known and not selected:
+                line += " [NOT PICKED — unavailable this battle]"
+            team_bits.append(line)
+        header = (
+            "Your team (* active, + picked bench, - not picked): "
+            if selection_known
+            else "Your team: "
+        )
+        lines.append(header + " | ".join(team_bits))
     if battle.opponent_team:
         foe_bits = [describe_pokemon(p, revealed_moves=True) for p in battle.opponent_team.values()]
         lines.append("Opponent revealed so far: " + " | ".join(foe_bits))
@@ -303,6 +336,9 @@ class TurnRecord:
     turn: int  # battle turn number (may repeat: multiple requests per turn)
     request: str  # the state + actions the model saw
     events: list[str] = field(default_factory=list)  # protocol events since previous decision
+    # structured replay rows (not persisted): deterministic pruning parses
+    # these — the joined ``events`` text cannot be split safely
+    event_rows: list[list[str]] = field(default_factory=list)
     decision: str | None = None  # e.g. "move:earthquake"
     reason: str | None = None
     cot: str | None = None  # assistant reasoning, verbatim

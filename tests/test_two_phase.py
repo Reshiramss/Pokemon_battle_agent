@@ -25,6 +25,7 @@ from pokeagent.context.records import TurnRecord
 from pokeagent.hooks.base import HookSystem
 from pokeagent.loop import AgentLoop, TurnAbort
 from pokeagent.providers.base import LLMResponse, ToolCallRequest
+from pokeagent.state import BattleState
 from pokeagent.tools.battle_query import BattleHistoryTool
 from pokeagent.tools.base import Tool, ToolError, ToolRegistry
 
@@ -226,6 +227,56 @@ def test_time_budget_forces_transition(tmp_path):
         boundary = _last_user(provider.calls[1])
         assert "information-gathering limit" in boundary.content
         assert outcome.decision == "move:flamethrower"
+
+    asyncio.run(scenario())
+
+
+def test_submit_decision_applies_reasoning_update(tmp_path):
+    """A valid submit carrying ``reasoning_update`` revises the plan."""
+    async def scenario():
+        loop, cm, provider = make_loop(
+            tmp_path,
+            [
+                LLMResponse(
+                    tool_calls=[
+                        ToolCallRequest(
+                            "c1",
+                            "submit_decision",
+                            {
+                                "actions": [{"slot": 1, "kind": "move", "move": "flamethrower"}],
+                                "reason": "chip",
+                                "reasoning_update": {
+                                    "win_conditions": ["keep gyarados healthy"],
+                                    "commitments": ["do not tera furret"],
+                                },
+                            },
+                        )
+                    ],
+                    stop_reason="tool_use",
+                )
+            ],
+        )
+        cm.state = BattleState()
+        outcome = await loop.run_turn(make_battle(), cm)
+        assert outcome.decision == "move:flamethrower"
+        assert cm.state.plan.win_conditions == ["keep gyarados healthy"]
+        assert cm.state.plan.commitments == ["do not tera furret"]
+        assert cm.state.plan.revision == 1
+
+    asyncio.run(scenario())
+
+
+def test_invalid_submit_does_not_apply_reasoning_update(tmp_path):
+    """The update is committed only together with a valid action."""
+    async def scenario():
+        bad = _submit(move="notamove")
+        bad.tool_calls[0].arguments["reasoning_update"] = {
+            "win_conditions": ["never committed"]
+        }
+        loop, cm, provider = make_loop(tmp_path, [bad, _submit()])
+        cm.state = BattleState()
+        await loop.run_turn(make_battle(), cm)
+        assert cm.state.plan.revision == 0
 
     asyncio.run(scenario())
 
