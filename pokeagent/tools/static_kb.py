@@ -16,6 +16,12 @@ from .base import Tool, ToolContext, ToolError
 
 MAX_RESULT_CHARS = 1200
 
+
+def _sd_for(ctx: ToolContext):
+    """The current battle's bundle (standard or a format mod overlay)."""
+    data = getattr(getattr(ctx, "kb", None), "data", None)
+    return data if data is not None else get_showdown_data()
+
 # Showdown status ids -> verb, for readable secondary-effect lines.
 _STATUS_NAMES = {
     "brn": "burn",
@@ -54,7 +60,7 @@ class MoveInfoTool(Tool):
     async def execute(self, ctx: ToolContext, move: str = "") -> str:
         if not move:
             raise ToolError("move name is required")
-        sd = get_showdown_data()
+        sd = _sd_for(ctx)
         if sd is not None:
             data = sd.move(move)
             if data is None:
@@ -138,7 +144,7 @@ class TypeInfoTool(Tool):
     ) -> str:
         if not attacking_type or not defending_types:
             raise ToolError("attacking_type and defending_types are required")
-        sd = get_showdown_data()
+        sd = _sd_for(ctx)
         if sd is not None:
             try:
                 multiplier = sd.type_multiplier(attacking_type, list(defending_types))
@@ -187,7 +193,7 @@ class SpeciesInfoTool(Tool):
     async def execute(self, ctx: ToolContext, species: str = "") -> str:
         if not species:
             raise ToolError("species name is required")
-        sd = get_showdown_data()
+        sd = _sd_for(ctx)
         if sd is not None:
             data = sd.species(species)
             if data is None:

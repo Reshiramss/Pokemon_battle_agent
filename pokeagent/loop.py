@@ -115,6 +115,14 @@ SUBMIT_DECISION = ToolSpec(
                             ),
                         },
                         "terastallize": {"type": "boolean"},
+                        "mega": {
+                            "type": "boolean",
+                            "description": (
+                                "Mega Evolve this Pokemon with the chosen move. "
+                                "Only when the action notes say it is available; "
+                                "Champions formats use this instead of Tera."
+                            ),
+                        },
                     },
                     "required": ["slot", "kind"],
                 },
@@ -851,12 +859,20 @@ class AgentLoop:
             return None, "", reason, "actions[0] must be an object with slot/kind fields."
         kind = str(a.get("kind", "")).lower()
         tera = bool(a.get("terastallize", False))
+        mega = bool(a.get("mega", False))
 
         if kind == "move":
             name = str(a.get("move", "")).strip()
             norm = normalize_name(name)
             for m in battle.available_moves:
                 if m.id == norm or normalize_name(m.id) == norm:
+                    if tera and mega:
+                        return (
+                            None,
+                            "",
+                            reason,
+                            "choose at most one gimmick: terastallize or mega.",
+                        )
                     if tera and not battle.can_tera:
                         return (
                             None,
@@ -864,9 +880,19 @@ class AgentLoop:
                             reason,
                             "terastallization is not available right now.",
                         )
+                    if mega and not getattr(battle, "can_mega_evolve", False):
+                        return (
+                            None,
+                            f"move:{m.id}",
+                            reason,
+                            "mega evolution is not available right now.",
+                        )
+                    suffix = ("+tera" if tera else "") + ("+mega" if mega else "")
                     return (
-                        Player.create_order(m, terastallize=tera),
-                        f"move:{m.id}",
+                        Player.create_order(
+                            m, terastallize=tera, mega=mega
+                        ),
+                        f"move:{m.id}{suffix}",
                         reason,
                         None,
                     )
@@ -879,12 +905,12 @@ class AgentLoop:
             )
 
         if kind == "switch":
-            if tera:
+            if tera or mega:
                 return (
                     None,
                     "switch",
                     reason,
-                    "terastallize=true requires kind='move'.",
+                    "terastallize/mega require kind='move'.",
                 )
             name = str(a.get("switch_to", "")).strip()
             norm = normalize_name(name)
@@ -932,6 +958,7 @@ class AgentLoop:
         parsed: dict[int, dict] = {}
         claimed: list = []  # bench Pokemon objects already taken by a switch
         tera_slot: int | None = None
+        mega_slot: int | None = None
         for a in raw:
             if not isinstance(a, dict):
                 return None, "", reason, "each action must be an object."
@@ -964,6 +991,7 @@ class AgentLoop:
                 )
 
             tera = bool(a.get("terastallize", False))
+            mega = bool(a.get("mega", False))
             if kind == "move":
                 name = str(a.get("move", "")).strip()
                 norm = normalize_name(name)
@@ -985,6 +1013,14 @@ class AgentLoop:
                         reason,
                         f"slot {slot}: invalid move '{name}'. Available: {available}.",
                     )
+                if tera and mega:
+                    return (
+                        None,
+                        "",
+                        reason,
+                        f"slot {slot}: choose at most one gimmick "
+                        "(terastallize or mega).",
+                    )
                 if tera:
                     if not battle.can_tera[i]:
                         return (
@@ -1001,7 +1037,38 @@ class AgentLoop:
                             reason,
                             "only one Pokemon can terastallize per turn.",
                         )
+                    if mega_slot is not None:
+                        return (
+                            None,
+                            "",
+                            reason,
+                            "only one gimmick (Tera or Mega) per turn.",
+                        )
                     tera_slot = i
+                if mega:
+                    if not battle.can_mega_evolve[i]:
+                        return (
+                            None,
+                            "",
+                            reason,
+                            f"slot {slot}: mega evolution is not available "
+                            "for this Pokemon.",
+                        )
+                    if mega_slot is not None:
+                        return (
+                            None,
+                            "",
+                            reason,
+                            "only one Pokemon can Mega Evolve per turn.",
+                        )
+                    if tera_slot is not None:
+                        return (
+                            None,
+                            "",
+                            reason,
+                            "only one gimmick (Tera or Mega) per turn.",
+                        )
+                    mega_slot = i
                 symbols = move_target_symbols(battle, move, i)
                 target = str(a.get("target", "")).strip().lower()
                 if target and target not in symbols:
@@ -1028,19 +1095,21 @@ class AgentLoop:
                     "order": Player.create_order(
                         move,
                         terastallize=tera,
+                        mega=mega,
                         move_target=symbol_position(target, i),
                     ),
                     "move": move.id,
                     "target": target,
                     "tera": tera,
+                    "mega": mega,
                 }
             elif kind == "switch":
-                if tera:
+                if tera or mega:
                     return (
                         None,
                         "",
                         reason,
-                        f"slot {slot}: terastallize=true requires kind='move'.",
+                        f"slot {slot}: terastallize/mega require kind='move'.",
                     )
                 name = str(a.get("switch_to", "")).strip()
                 norm = normalize_name(name)
@@ -1123,6 +1192,8 @@ class AgentLoop:
                     bits += f"->{v['target']}"
                 if v["tera"]:
                     bits += "+tera"
+                if v.get("mega"):
+                    bits += "+mega"
                 parts.append(bits)
             else:
                 parts.append(f"slot{i + 1}:switch:{v['species']}")

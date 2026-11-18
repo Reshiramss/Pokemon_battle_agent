@@ -8,10 +8,15 @@ All lookups are CPU-cheap, in-memory, and safe inside ``choose_move``.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from poke_env.data import GenData
-from poke_env.stats import compute_raw_stats
+
+from ..formats import FormatProfile, profile_for
+from ..stats import estimate_opponent_stats
+
+if TYPE_CHECKING:
+    from .showdown_data import ShowdownData
 
 
 def normalize_name(name: str) -> str:
@@ -20,17 +25,43 @@ def normalize_name(name: str) -> str:
 
 
 class StaticKB:
-    """Per-format static knowledge. Built once per agent (GenData is a singleton per gen)."""
+    """Per-format static knowledge. Built once per agent (single-format player).
 
-    def __init__(self, battle_format: str):
+    ``data`` is the format's Showdown JSON bundle (standard or a mod overlay
+    merged over it); GenData remains the fallback when the bundle is absent.
+    """
+
+    def __init__(
+        self,
+        battle_format: str,
+        *,
+        profile: FormatProfile | None = None,
+        data: "ShowdownData | None" = None,
+    ):
+        self.profile = profile or profile_for(battle_format)
         self.gen_data: GenData = GenData.from_format(battle_format)
+        if data is not None:
+            self.data = data
+        else:
+            # local import avoids the showdown_data -> static.normalize cycle
+            from .showdown_data import get_showdown_data
+
+            self.data = get_showdown_data(self.profile.data_key)
 
     # --- raw data dicts -------------------------------------------------
 
     def move_data(self, move_name: str) -> dict[str, Any] | None:
+        if self.data is not None:
+            entry = self.data.move(move_name)
+            if entry is not None:
+                return entry
         return self.gen_data.moves.get(normalize_name(move_name))
 
     def species_data(self, species: str) -> dict[str, Any] | None:
+        if self.data is not None:
+            entry = self.data.species(species)
+            if entry is not None:
+                return entry
         key = normalize_name(species)
         # try exact id, then suffix-free match for forms ("charizardgmax" vs "charizard")
         dex = self.gen_data.pokedex
@@ -43,6 +74,15 @@ class StaticKB:
         if base in dex:
             return dex[base]
         return None
+
+    def species_key(self, species: str) -> str:
+        """Team-identity key: Mega/Primal forms collapse to the base species."""
+        entry = self.data.species(species) if self.data is not None else None
+        if isinstance(entry, dict):
+            base = entry.get("baseSpecies") or entry.get("changesFrom")
+            if base:
+                return normalize_name(base)
+        return normalize_name(species)
 
     def learnset(self, species: str) -> list[str]:
         """Sorted learnable move ids, or [] if unknown.
@@ -87,26 +127,29 @@ class StaticKB:
 
     # --- opponent stat estimation ----------------------------------------
 
-    def estimate_stats(self, species: str, level: int) -> dict[str, int]:
-        """Estimate stats for an opponent with unknown EVs/IVs/nature.
+    def estimate_stats(
+        self,
+        species: str,
+        level: int,
+        *,
+        base_stats: dict[str, Any] | None = None,
+    ) -> dict[str, int]:
+        """Estimate stats for an opponent with unknown spread.
 
-        Uses the random-battle-style even spread (85 EVs / 31 IVs / neutral
-        nature), which matches Showdown random-battle generation closely
-        enough for damage *ranges*. Returns {"hp":..,"atk":..,"def":..,
-        "spa":..,"spd":..,"spe":..} or {} if the species is unknown.
+        Standard: random-battle-style even spread (85 EVs / 31 IVs / neutral).
+        Champions: 11 stat points per stat (66 total) and no level/IV term.
+        ``base_stats`` should be the live Pokémon's base stats when available
+        so a Mega form's new spread is used instead of the base species.
+        Returns {"hp":..,"atk":..,"def":..,"spa":..,"spd":..,"spe":..} or {}.
         """
-        try:
-            raw = compute_raw_stats(
-                species=species,
-                evs=[85] * 6,
-                ivs=[31] * 6,
-                level=level,
-                nature="serious",
-                data=self.gen_data,
-            )
-        except Exception:
+        if base_stats is None:
+            entry = self.species_data(species) or {}
+            base_stats = entry.get("baseStats") if isinstance(entry, dict) else None
+        if not base_stats:
             return {}
-        if not raw or len(raw) != 6:
-            return {}
-        keys = ["hp", "atk", "def", "spa", "spd", "spe"]
-        return dict(zip(keys, raw))
+        return estimate_opponent_stats(
+            self.profile,
+            base_stats,
+            level,
+            species=normalize_name(species),
+        )

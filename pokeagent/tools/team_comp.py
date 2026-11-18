@@ -80,6 +80,13 @@ class TeamCompTool(Tool):
         entries = _archetypes()
         if not entries:
             raise ToolError("team composition data is not available")
+        profile = getattr(getattr(ctx, "kb", None), "profile", None)
+        caveat = (
+            "Note: these archetypes are curated from standard Gen 9 VGC; "
+            "Champion legality and data can differ.\n"
+            if profile is not None and profile.is_champions
+            else ""
+        )
         if archetype:
             match = next((a for a in entries if a.id == archetype), None)
             if match is None:
@@ -87,8 +94,8 @@ class TeamCompTool(Tool):
                 raise ToolError(
                     f"unknown archetype '{archetype}'. Valid ids: {valid}"
                 )
-            return _clip(self._format_full(match))
-        return _clip(self._format_matches(ctx, entries))
+            return caveat + _clip(self._format_full(match))
+        return caveat + _clip(self._format_matches(ctx, entries))
 
     # --- rendering ---------------------------------------------------------
 

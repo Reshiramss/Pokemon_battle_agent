@@ -10,7 +10,10 @@ model = "your-model-name"
 # reasoning_effort = "low"                     # deepseek-flash: low|high|max; unset -> not sent (model default)
 # battle_format = "gen9vgc2025regihidden"       # default: doubles VGC 6-pick-4, no team sheets
 # battle_format = "gen9randombattle"            # singles; no team needed
+# battle_format = "gen9championsvgc2026regmchidden"  # Pokémon Champions doubles 6-pick-4 (stat points, Mega, no Tera)
+# battle_format = "gen9championsvgc2026regmc"   # official Champion VGC format (VGC Timer)
 # team = "Shadow Bolt"                          # library name (see teams/) or raw packed string
+# team = "Champions A"                          # Champion teams use Stat Points (0-32, total <=66)
 # teams_dir = "/path/to/your/teams"             # optional user import dir, merged into the library
 server_port = 8964                             # must match your Showdown server
 # turn_budget = 45.0                            # hard per-turn wall clock (seconds)

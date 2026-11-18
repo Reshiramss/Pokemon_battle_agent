@@ -44,7 +44,23 @@ class TeamEntry:
     packed: str
     archetype: str | None = None
     description: str | None = None
+    format: str | None = None  # "champions" / "standard"; None = wildcard
     source: Path | None = None  # file the team came from (None for raw strings)
+
+
+def _format_matches(entry: TeamEntry, profile) -> bool:
+    """Whether a team belongs to the profile's format (untagged = wildcard)."""
+    if not entry.format or profile is None:
+        return True
+    tag = entry.format.strip().lower()
+    if tag in ("champions", "champion"):
+        return bool(getattr(profile, "is_champions", False))
+    if tag in ("standard", "gen9", "regular"):
+        return not getattr(profile, "is_champions", False)
+    return tag in {
+        str(getattr(profile, "mod", "")).lower(),
+        str(getattr(profile, "memory_key", "") or "").lower(),
+    }
 
 
 class TeamLibrary:
@@ -98,17 +114,22 @@ class TeamLibrary:
                 f"unknown team '{name}' (available: {', '.join(self.names)})"
             ) from None
 
-    def random_pair(self) -> tuple[TeamEntry, TeamEntry]:
-        """Two distinct teams, for AI-vs-AI battles."""
-        if len(self._entries) < 2:
-            raise ValueError("random_pair needs at least 2 teams in the library")
-        a, b = random.sample(list(self._entries.values()), 2)
+    def random_pair(self, profile=None) -> tuple[TeamEntry, TeamEntry]:
+        """Two distinct teams for AI-vs-AI battles, filtered by format."""
+        candidates = [e for e in self._entries.values() if _format_matches(e, profile)]
+        if len(candidates) < 2:
+            raise ValueError(
+                "random_pair needs at least 2 teams in the library for this format"
+            )
+        a, b = random.sample(candidates, 2)
         return a, b
 
-    def random_other(self, packed: str) -> TeamEntry:
+    def random_other(self, packed: str, profile=None) -> TeamEntry:
         """A team different from ``packed`` (also accepts raw packed strings)."""
         candidates = [
-            e for e in self._entries.values() if e.packed.strip() != packed.strip()
+            e
+            for e in self._entries.values()
+            if e.packed.strip() != packed.strip() and _format_matches(e, profile)
         ]
         if not candidates:
             raise ValueError("no different team available in the library")
@@ -124,6 +145,7 @@ def parse_team_file(path: Path) -> TeamEntry | None:
     name = path.stem
     archetype = None
     description = None
+    team_format = None
     packed_lines: list[str] = []
     for line in path.read_text(encoding="utf8").splitlines():
         stripped = line.strip()
@@ -140,6 +162,8 @@ def parse_team_file(path: Path) -> TeamEntry | None:
                 archetype = value
             elif key == "description":
                 description = value
+            elif key == "format":
+                team_format = value
         else:
             packed_lines.append(stripped)
     if not packed_lines:
@@ -149,6 +173,7 @@ def parse_team_file(path: Path) -> TeamEntry | None:
         packed="".join(packed_lines),
         archetype=archetype,
         description=description,
+        format=team_format,
         source=path,
     )
 

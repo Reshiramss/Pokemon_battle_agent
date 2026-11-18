@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .showdown_data import get_showdown_data
+from .static import normalize_name
 
 if TYPE_CHECKING:
     from poke_env.battle import AbstractBattle
@@ -38,6 +39,7 @@ class MonNode:
     tera_type: str | None = None  # revealed tera type
     terastallized: bool = False
     fainted: bool = False
+    mega_evolved: bool = False  # form changed via Mega Evolution
     selected: bool | None = None  # picked in team preview (None = singles)
     # current battle state, bound from the live object on every refresh.
     # ``hp_fraction`` is None for opponent preview stubs (nothing revealed);
@@ -71,6 +73,7 @@ class MonNode:
             f"item: {self.item}" if self.item else None,
             f"tera: {self.tera_type}" if self.tera_type else None,
             "TERASTALLIZED" if self.terastallized else None,
+            "MEGA" if self.mega_evolved else None,
             "fainted" if self.fainted else None,
         ]
         return " | ".join(b for b in bits if b)
@@ -81,21 +84,24 @@ def _tname(value) -> str:
     return getattr(value, "name", str(value))
 
 
-def _static_entry(species: str, kb=None) -> dict[str, Any]:
+def _static_entry(species: str, kb=None, data=None) -> dict[str, Any]:
     """Types / base stats / possible abilities for a species, any source.
 
-    Prefers the Showdown bundle (keeps form keys exact); falls back to the
-    GenData-based StaticKB. Empty dict if neither knows the species.
+    Prefers the profile's Showdown bundle (keeps form keys exact and reflects
+    format mods such as Champions); falls back to the GenData-based StaticKB.
+    Empty dict if neither knows the species.
     """
-    sd = get_showdown_data()
+    sd = data if data is not None else getattr(kb, "data", None)
+    if sd is None:
+        sd = get_showdown_data()
     if sd is not None:
-        data = sd.species(species)
-        if data:
-            return data
+        entry = sd.species(species)
+        if entry:
+            return entry
     if kb is not None:
-        data = kb.species_data(species)
-        if data:
-            return data
+        entry = kb.species_data(species)
+        if entry:
+            return entry
     return {}
 
 
@@ -114,6 +120,24 @@ class BattleKB:
     def __init__(self):
         self.us: dict[str, MonNode] = {}
         self.them: dict[str, MonNode] = {}
+        # live species -> team-identity key (Mega/Primal forms map to the base
+        # species so a forme change never creates a second team node)
+        self._key_cache: dict[str, str] = {}
+        self.data = None
+        self.kb = None
+
+    def _key_for(self, species: str, data=None) -> str:
+        """Team-identity key for a live species id (Mega -> base species)."""
+        key = normalize_name(species)
+        cached = self._key_cache.get(key)
+        if cached is not None:
+            return cached
+        sd = data if data is not None else self.data
+        entry = _static_entry(species, self.kb, data=sd) or {}
+        base = entry.get("baseSpecies") or entry.get("changesFrom")
+        resolved = normalize_name(base) if base else key
+        self._key_cache[key] = resolved
+        return resolved
 
     # --- construction ------------------------------------------------------
 
@@ -126,13 +150,21 @@ class BattleKB:
         """
         self.us.clear()
         self.them.clear()
+        self._key_cache.clear()
+        self.kb = kb
+        self.data = getattr(kb, "data", None)
         preview = self._preview_selected(battle)
         preview_foes = bool(getattr(battle, "teampreview", False))
         for mon in battle.team.values():
-            self.us[mon.species] = self._own_node(mon, preview=preview)
+            key = self._key_for(mon.species, self.data)
+            self.us[key] = self._own_node(
+                mon, preview=preview, data=self.data, species_key=key
+            )
         for mon in battle.opponent_team.values():
-            self.them[mon.species] = self._foe_node(
-                mon, kb, hidden_hp=preview_foes
+            key = self._key_for(mon.species, self.data)
+            self.them[key] = self._foe_node(
+                mon, kb, hidden_hp=preview_foes, data=self.data,
+                species_key=key,
             )
 
     def refresh(self, battle: "AbstractBattle", kb=None) -> None:
@@ -143,10 +175,12 @@ class BattleKB:
         in formats without preview) — those get nodes on the fly.
         """
         preview = self._preview_selected(battle)
+        self.kb = kb
+        self.data = getattr(kb, "data", None)
         for mon in battle.team.values():
-            self._refresh_own(mon, preview=preview)
+            self._refresh_own(mon, preview=preview, data=self.data)
         for mon in battle.opponent_team.values():
-            self._refresh_foe(mon, kb)
+            self._refresh_foe(mon, kb, data=self.data)
 
     # --- node factories / updaters ---------------------------------------
 
@@ -167,6 +201,18 @@ class BattleKB:
         where Showdown reports 0 HP that does not mean "fainted".
         """
         node.level = mon.level
+        # poke-env has no ``is_mega`` flag; a changed base-stat spread is the
+        # reliable signal that Mega Evolution replaced the forme's base stats.
+        try:
+            live_base = {
+                str(k): int(v) for k, v in dict(mon.base_stats).items()
+            }
+        except Exception:
+            live_base = {}
+        if live_base:
+            if node.base_stats and live_base != node.base_stats:
+                node.mega_evolved = True
+            node.base_stats = live_base
         try:
             node.types = [_tname(t) for t in mon.types]
         except Exception:
@@ -200,10 +246,12 @@ class BattleKB:
         elif getattr(mon, "tera_type", None):
             node.tera_type = _tname(mon.tera_type)
 
-    def _own_node(self, mon, *, preview: bool = False) -> MonNode:
-        entry = _static_entry(mon.species)
+    def _own_node(
+        self, mon, *, preview: bool = False, data=None, species_key=None
+    ) -> MonNode:
+        entry = _static_entry(mon.species, data=data)
         node = MonNode(
-            species=mon.species,
+            species=species_key or self._key_for(mon.species, data),
             side="us",
             base_stats=dict(
                 entry.get("baseStats")
@@ -233,10 +281,13 @@ class BattleKB:
         node.item = item if item and item != "unknown_item" else None
         return node
 
-    def _refresh_own(self, mon, *, preview: bool = False) -> None:
-        node = self.us.get(mon.species)
+    def _refresh_own(self, mon, *, preview: bool = False, data=None) -> None:
+        key = self._key_for(mon.species, data)
+        node = self.us.get(key)
         if node is None:
-            self.us[mon.species] = node = self._own_node(mon, preview=preview)
+            self.us[key] = node = self._own_node(
+                mon, preview=preview, data=data, species_key=key
+            )
             return
         self._bind_common(node, mon)
         if preview:
@@ -255,10 +306,13 @@ class BattleKB:
         if item and item != "unknown_item":
             node.item = item
 
-    def _foe_node(self, mon, kb=None, *, hidden_hp: bool = False) -> MonNode:
-        entry = _static_entry(mon.species, kb)
+    def _foe_node(
+        self, mon, kb=None, *, hidden_hp: bool = False, data=None,
+        species_key=None,
+    ) -> MonNode:
+        entry = _static_entry(mon.species, kb, data=data)
         node = MonNode(
-            species=mon.species,
+            species=species_key or self._key_for(mon.species, data),
             side="them",
             base_stats=dict(
                 entry.get("baseStats")
@@ -273,10 +327,13 @@ class BattleKB:
         node.item = item if item and item != "unknown_item" else None
         return node
 
-    def _refresh_foe(self, mon, kb=None) -> None:
-        node = self.them.get(mon.species)
+    def _refresh_foe(self, mon, kb=None, *, data=None) -> None:
+        key = self._key_for(mon.species, data)
+        node = self.them.get(key)
         if node is None:
-            self.them[mon.species] = node = self._foe_node(mon, kb)
+            self.them[key] = node = self._foe_node(
+                mon, kb, data=data, species_key=key
+            )
             return
         self._bind_common(node, mon)
         if mon.moves:
@@ -286,6 +343,10 @@ class BattleKB:
             node.item = item
 
     # --- access ------------------------------------------------------------
+
+    def key_for(self, species: str, data=None) -> str:
+        """Public team-identity key (see :meth:`_key_for`)."""
+        return self._key_for(species, data)
 
     def query(self, species: str) -> MonNode | None:
         return self.us.get(species) or self.them.get(species)

@@ -35,6 +35,17 @@ def _label(mult: float) -> str:
     return _LABELS.get(round(mult, 2), f"x{mult:g}")
 
 
+def _move_type(move, kb) -> str:
+    """Move type, preferring the format bundle (Champions has type overrides)."""
+    profile = getattr(kb, "profile", None)
+    data = getattr(kb, "data", None)
+    if profile is not None and profile.is_champions and data is not None:
+        entry = data.move(getattr(move, "id", str(move)))
+        if entry and entry.get("type"):
+            return str(entry["type"]).upper()
+    return _tname(move.type)
+
+
 class TypeMatchupHook(PreDecisionHook):
     """Offense/defense type matrix for the active mons plus revealed moves."""
 
@@ -90,8 +101,8 @@ class TypeMatchupHook(PreDecisionHook):
                 if key in seen:
                     continue
                 seen.add(key)
-                mult = kb.type_effectiveness(_tname(move.type), opp_types)
-                lines.append(f"- {move.id} ({_tname(move.type)}): {_label(mult)}")
+                mult = kb.type_effectiveness(_move_type(move, kb), opp_types)
+                lines.append(f"- {move.id} ({_move_type(move, kb)}): {_label(mult)}")
 
         # --- defense: opponent's revealed moves vs me ---
         opp_moves = list(opp.moves.values())
@@ -101,8 +112,8 @@ class TypeMatchupHook(PreDecisionHook):
                 f"({'/'.join(my_types)}):"
             )
             for move in opp_moves[: self.max_moves]:
-                mult = kb.type_effectiveness(_tname(move.type), my_types)
-                lines.append(f"- {move.id} ({_tname(move.type)}): {_label(mult)}")
+                mult = kb.type_effectiveness(_move_type(move, kb), my_types)
+                lines.append(f"- {move.id} ({_move_type(move, kb)}): {_label(mult)}")
 
         return lines
 
@@ -140,10 +151,10 @@ class TypeMatchupHook(PreDecisionHook):
                     continue
                 seen.add(key)
                 vs = " / ".join(
-                    f"{f.species} {_label(kb.type_effectiveness(_tname(move.type), foe_types[f.species]))}"
+                    f"{f.species} {_label(kb.type_effectiveness(_move_type(move, kb), foe_types[f.species]))}"
                     for f in foes
                 )
-                lines.append(f"- {move.id} ({_tname(move.type)}): {vs}")
+                lines.append(f"- {move.id} ({_move_type(move, kb)}): {vs}")
 
         # --- defense: each foe's revealed moves vs each of our actives ---
         for foe in foes:
@@ -153,9 +164,9 @@ class TypeMatchupHook(PreDecisionHook):
             lines.append(f"Defense — {foe.species}'s revealed moves:")
             for move in opp_moves[: self.max_moves]:
                 vs = " / ".join(
-                    f"{m.species} {_label(kb.type_effectiveness(_tname(move.type), my_types[m.species]))}"
+                    f"{m.species} {_label(kb.type_effectiveness(_move_type(move, kb), my_types[m.species]))}"
                     for m in actives
                 )
-                lines.append(f"- {move.id} ({_tname(move.type)}): {vs}")
+                lines.append(f"- {move.id} ({_move_type(move, kb)}): {vs}")
 
         return lines

@@ -32,6 +32,19 @@ class MechanicsHook(PreDecisionHook):
             return None
 
         lines = list(kb.core_doubles_lines())
+        profile = getattr(ctx.kb, "profile", None)
+        if profile is not None and profile.is_champions:
+            if profile.uses_stat_points:
+                lines.append(
+                    "CHAMPIONS: stats use stat points (0-32 each, 66 total), "
+                    "not EVs/IVs/level; no Tera; Mega Evolution is available "
+                    "when noted; PP is capped at 20."
+                )
+            else:
+                lines.append(
+                    "CHAMPIONS: mainline level stats (Level Clause), but "
+                    "Champions move/item data and PP rules apply; no Tera."
+                )
         for weather in ctx.battle.weather:
             line = kb.context_line("weather", weather.name)
             if line:

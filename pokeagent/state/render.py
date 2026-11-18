@@ -13,8 +13,13 @@ not a fainted mon).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ..knowledge.tree import MonNode
 from .model import BattleState
+
+if TYPE_CHECKING:
+    from ..formats import FormatProfile
 
 
 def _describe(node: MonNode, *, revealed_moves: bool = False) -> str:
@@ -32,6 +37,8 @@ def _describe(node: MonNode, *, revealed_moves: bool = False) -> str:
         parts.append("(" + "/".join(node.types) + ")")
     if node.terastallized and node.tera_type:
         parts.append(f"tera:{node.tera_type}")
+    if node.mega_evolved:
+        parts.append("MEGA")
     if node.boosts:
         parts.append(
             "boosts{"
@@ -62,13 +69,23 @@ def _ordered(state: BattleState, *, ours: bool) -> list[str]:
     return ordered
 
 
-def _speed_estimate(node: MonNode) -> int:
-    """Level-50 base-stat speed estimate (31 IV, 0 EV, neutral nature)."""
+def _speed_estimate(
+    node: MonNode, profile: "FormatProfile | None" = None
+) -> int:
+    """Opponent speed estimate under the profile's stat model.
+
+    Standard: level-50 base-stat estimate (31 IV, 0 EV, neutral nature).
+    Champions: 11 stat points + the 20-point offset, no level/IV term.
+    """
     base = node.base_stats.get("spe", 0)
+    if profile is not None and profile.uses_stat_points:
+        return int(base + 11 + 20)
     return int((2 * base + 31) * (node.level or 50) / 100 + 5)
 
 
-def render_observed(state: BattleState) -> str:
+def render_observed(
+    state: BattleState, profile: "FormatProfile | None" = None
+) -> str:
     """The dense board text for ``[NOW]``, rendered from persisted state."""
     lines = [f"Turn {state.field.turn} | {state.meta.format}"]
     if state.field.weather:
@@ -83,7 +100,7 @@ def render_observed(state: BattleState) -> str:
         )
 
     if state.meta.doubles:
-        lines.extend(_doubles_lines(state))
+        lines.extend(_doubles_lines(state, profile))
     else:
         lines.append(f"Your active: {_active_line(state, ours=True, slot=0)}")
         lines.append(f"Opponent active: {_active_line(state, ours=False, slot=0)}")
@@ -133,7 +150,9 @@ def _active_line(state: BattleState, *, ours: bool, slot: int) -> str:
     return _describe(node, revealed_moves=not ours)
 
 
-def _doubles_lines(state: BattleState) -> list[str]:
+def _doubles_lines(
+    state: BattleState, profile: "FormatProfile | None" = None
+) -> list[str]:
     """Slot-labelled field state plus the speed-order line (doubles only)."""
     lines: list[str] = []
     for i in range(len(state.ours.active)):
@@ -159,7 +178,7 @@ def _doubles_lines(state: BattleState) -> list[str]:
         node = state.kb.them.get(species)
         if node is None or node.fainted:
             continue
-        entries.append((_speed_estimate(node), species, "foe~"))
+        entries.append((_speed_estimate(node, profile), species, "foe~"))
     if entries:
         entries.sort(key=lambda entry: -entry[0])
         bits = [

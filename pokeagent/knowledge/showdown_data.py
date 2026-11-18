@@ -6,10 +6,14 @@ once from the compiled Showdown tables (see
 pokemon-showdown checkout). This is fresher and richer than what poke-env's
 GenData exposes: move descriptions, tiers, aliases, flavor text.
 
-Everything is loaded lazily, once per process, into plain dicts — lookups
-are CPU-cheap and safe inside ``choose_move``. If the JSON bundle is
-missing, :func:`get_showdown_data` returns None and callers fall back to
-their GenData-based path.
+Format mods (Pokémon Champions) are layered on top: ``showdown_champions/``
+holds the compiled mod's override tables, which are merged into the base
+tables with Showdown's ``inherit: true`` semantics. Bundles are loaded lazily
+and cached per bundle key, so a standard and a champion profile can coexist
+in one process without mutating each other.
+
+If the JSON bundle is missing, :func:`get_showdown_data` returns None and
+callers fall back to their GenData-based path.
 """
 
 from __future__ import annotations
@@ -21,7 +25,8 @@ from typing import Any
 
 from .static import normalize_name
 
-_DATA_DIR = Path(__file__).resolve().parents[1] / "data" / "showdown"
+_DATA_ROOT = Path(__file__).resolve().parents[1] / "data"
+_BASE_BUNDLE = "showdown"
 
 # Showdown's damageTaken encodes the multiplier as an index:
 # 0 = 1x, 1 = 2x (weak), 2 = 0.5x (resist), 3 = 0x (immune).
@@ -29,18 +34,74 @@ _DAMAGE_TAKEN = {0: 1.0, 1: 2.0, 2: 0.5, 3: 0.0}
 
 _FORM_SUFFIXES = ("gmax", "mega", "megax", "megay", "primal", "totem", "eternal")
 
+# tables that a format mod may override (base table -> overlay file name)
+_OVERLAY_FILES = {
+    "moves": "moves",
+    "abilities": "abilities",
+    "items": "items",
+    "formats": "formats",
+}
 
-def _load(name: str) -> dict[str, Any]:
-    with (_DATA_DIR / f"{name}.json").open(encoding="utf-8") as f:
+
+def _bundle_dir(bundle: str) -> Path:
+    return _DATA_ROOT / bundle
+
+
+def _load(dirpath: Path, name: str) -> dict[str, Any]:
+    with (dirpath / f"{name}.json").open(encoding="utf-8") as f:
         return json.load(f)
 
 
-def _load_optional(name: str) -> dict[str, Any]:
-    path = _DATA_DIR / f"{name}.json"
+def _load_optional(dirpath: Path, name: str) -> dict[str, Any]:
+    path = dirpath / f"{name}.json"
     if not path.exists():
         return {}
     with path.open(encoding="utf-8") as f:
         return json.load(f)
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for key, value in overlay.items():
+        if key == "inherit":
+            continue
+        if (
+            isinstance(value, dict)
+            and isinstance(out.get(key), dict)
+            and not isinstance(out.get(key), list)
+        ):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _merge_table(
+    base: dict[str, Any], overlay: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply a Showdown mod table (``inherit: true``) over a base table."""
+    if not overlay:
+        return base
+    out = dict(base)
+    for key, entry in overlay.items():
+        if not isinstance(entry, dict):
+            out[key] = entry
+            continue
+        base_entry = out.get(key)
+        if entry.get("inherit") and isinstance(base_entry, dict):
+            out[key] = _deep_merge(base_entry, entry)
+        else:
+            out[key] = {k: v for k, v in entry.items() if k != "inherit"}
+    return out
+
+
+def _cap_pp(moves: dict[str, Any], cap: int = 20) -> None:
+    """Champions caps every move's base PP at 20 at battle start."""
+    for entry in moves.values():
+        if isinstance(entry, dict):
+            pp = entry.get("pp")
+            if isinstance(pp, int) and pp > cap:
+                entry["pp"] = cap
 
 
 def _has_cjk(text: str) -> bool:
@@ -71,19 +132,34 @@ def _fuzzy_cjk_match(index: dict[str, str], query: str) -> str | None:
 
 
 class ShowdownData:
-    """All static tables from the Showdown data dump, with lookup helpers."""
+    """All static tables from one bundle, with lookup helpers."""
 
-    def __init__(self) -> None:
-        self.moves: dict[str, Any] = _load("moves")
-        self.pokedex: dict[str, Any] = _load("pokedex")
-        self.typechart: dict[str, Any] = _load("typechart")
-        self.aliases: dict[str, str] = _load("aliases")
-        self.formats: dict[str, Any] = _load("formats")
-        self.text_moves: dict[str, Any] = _load("text_moves")
-        self.text_pokedex: dict[str, Any] = _load("text_pokedex")
-        # ability tables (may be absent in bundles from older exports)
-        self.abilities: dict[str, Any] = _load_optional("abilities")
-        self.text_abilities: dict[str, Any] = _load_optional("text_abilities")
+    def __init__(self, bundle: str = _BASE_BUNDLE) -> None:
+        self.bundle = bundle
+        base_dir = _bundle_dir(_BASE_BUNDLE)
+        overlay_dir = _bundle_dir(bundle)
+
+        self.moves: dict[str, Any] = _load(base_dir, "moves")
+        self.pokedex: dict[str, Any] = _load(base_dir, "pokedex")
+        self.typechart: dict[str, Any] = _load(base_dir, "typechart")
+        self.aliases: dict[str, str] = _load(base_dir, "aliases")
+        self.formats: dict[str, Any] = _load(base_dir, "formats")
+        self.text_moves: dict[str, Any] = _load(base_dir, "text_moves")
+        self.text_pokedex: dict[str, Any] = _load(base_dir, "text_pokedex")
+        # ability/item tables (may be absent in bundles from older exports)
+        self.abilities: dict[str, Any] = _load_optional(base_dir, "abilities")
+        self.text_abilities: dict[str, Any] = _load_optional(
+            base_dir, "text_abilities"
+        )
+        self.items: dict[str, Any] = _load_optional(base_dir, "items")
+
+        if bundle and bundle != _BASE_BUNDLE:
+            for attr, filename in _OVERLAY_FILES.items():
+                overlay = _load_optional(overlay_dir, filename)
+                setattr(self, attr, _merge_table(getattr(self, attr), overlay))
+            if bundle.startswith("showdown_champions"):
+                _cap_pp(self.moves)
+
         # Simplified-Chinese official names (may be absent in older bundles)
         self._zh: dict[str, dict[str, str]] = {}
         for table_name, json_name in (
@@ -92,7 +168,7 @@ class ShowdownData:
             ("abilities", "zh_abilities"),
         ):
             index: dict[str, str] = {}
-            for key, entry in _load_optional(json_name).items():
+            for key, entry in _load_optional(base_dir, json_name).items():
                 if isinstance(entry, dict) and entry.get("name"):
                     index[entry["name"]] = key
             self._zh[table_name] = index
@@ -103,6 +179,7 @@ class ShowdownData:
             ("moves", self.moves),
             ("pokedex", self.pokedex),
             ("abilities", self.abilities),
+            ("items", self.items),
         ):
             index: dict[str, str] = {}
             for key, entry in table.items():
@@ -173,6 +250,12 @@ class ShowdownData:
         key = self._resolve("abilities", name)
         return self.text_abilities.get(key) if key else None
 
+    def item(self, name: str) -> dict[str, Any] | None:
+        if not self.items:
+            return None
+        key = self._resolve("items", name)
+        return self.items.get(key) if key else None
+
     def tier(self, name: str) -> str | None:
         """Competitive tier (OU/UU/.../ZU/LC/NFE) or None if unknown."""
         key = self._resolve("pokedex", name)
@@ -206,14 +289,15 @@ class ShowdownData:
         return multiplier
 
 
-_INSTANCE: ShowdownData | None = None
+_INSTANCES: dict[str, ShowdownData] = {}
 
 
-def get_showdown_data() -> ShowdownData | None:
-    """Process-wide singleton; None if the exported JSON bundle is absent."""
-    global _INSTANCE
-    if _INSTANCE is None:
-        if not (_DATA_DIR / "pokedex.json").exists():
-            return None
-        _INSTANCE = ShowdownData()
-    return _INSTANCE
+def get_showdown_data(bundle: str = _BASE_BUNDLE) -> ShowdownData | None:
+    """Process-wide cache per bundle; None if the base JSON bundle is absent."""
+    if bundle in _INSTANCES:
+        return _INSTANCES[bundle]
+    if not (_bundle_dir(_BASE_BUNDLE) / "pokedex.json").exists():
+        return None
+    instance = ShowdownData(bundle)
+    _INSTANCES[bundle] = instance
+    return instance

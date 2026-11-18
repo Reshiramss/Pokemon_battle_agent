@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..knowledge.static import normalize_name
 from .keys import opponent_key, our_team_key, sanitize_key
-from .store import MemoryStore
+from .store import MemoryStore, memory_root
 from .tactics import TacticSpec, detect_tactics
 
 if TYPE_CHECKING:
@@ -139,10 +139,11 @@ def _our_species(battle: "AbstractBattle") -> list[str]:
 class MemoryWriter:
     """Derives memory rows from finished battles and post-battle reviews."""
 
-    def __init__(self, config, store: MemoryStore | None = None):
+    def __init__(self, config, store: MemoryStore | None = None, profile=None):
         self.config = config
+        self.profile = profile
         self.store = store or MemoryStore(
-            getattr(config, "memory_path", None) or "runs/_memory",
+            memory_root(config, profile),
             lines_cap=getattr(config, "memory_lines_cap", 500),
         )
 

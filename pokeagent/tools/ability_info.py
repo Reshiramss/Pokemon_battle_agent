@@ -36,7 +36,7 @@ class AbilityInfoTool(Tool):
     async def execute(self, ctx: ToolContext, ability: str = "") -> str:
         if not ability:
             raise ToolError("ability name is required")
-        sd = get_showdown_data()
+        sd = getattr(getattr(ctx, "kb", None), "data", None) or get_showdown_data()
         if sd is None:
             raise ToolError("ability data is not available (no Showdown bundle)")
         data = sd.ability(ability)

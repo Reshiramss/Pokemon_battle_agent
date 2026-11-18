@@ -19,6 +19,9 @@ from poke_env.battle import DoubleBattle
 if TYPE_CHECKING:
     from poke_env.battle import AbstractBattle
 
+    from ..formats import FormatProfile
+    from ..knowledge.showdown_data import ShowdownData
+
 # Showdown target positions (DoubleBattle class attributes, mirrored for the
 # symbolic<->int mapping used by loop.py validation)
 POKEMON_POSITIONS = (-1, -2)
@@ -107,13 +110,18 @@ def _preview_selection_known(battle: "AbstractBattle") -> bool:
     )
 
 
-def _speed_estimate(p) -> int:
-    """Level-50 speed estimate from base stats (31 IV, 0 EV, neutral nature).
+def _speed_estimate(
+    p, profile: "FormatProfile | None" = None
+) -> int:
+    """Opponent speed estimate under the profile's stat model.
 
-    Only used for OPPONENT mons whose actual EVs/IVs/nature are unknown;
-    our own team reports exact ``stats['spe']``.
+    Standard: level-50 base-stat estimate (31 IV, 0 EV, neutral nature).
+    Champions: 11 stat points + the 20-point offset, no level/IV term.
+    Only used for OPPONENT mons; our own team reports exact ``stats['spe']``.
     """
     base = p.base_stats.get("spe", 0)
+    if profile is not None and profile.uses_stat_points:
+        return int(base + 11 + 20)
     return int((2 * base + 31) * p.level / 100 + 5)
 
 
@@ -135,6 +143,11 @@ def describe_pokemon(p, *, revealed_moves: bool = False) -> str:
         pass
     if getattr(p, "is_terastallized", False) and p.tera_type:
         parts.append(f"tera:{_name(p.tera_type)}")
+    # poke-env has no is_mega flag; a detailschange to "<species>mega" is the
+    # observable marker (checking forme_change_ability would also label
+    # Primal/Tera formes as MEGA).
+    if "mega" in str(getattr(p, "species", "")).lower():
+        parts.append("MEGA")
     try:
         boosts = {k: v for k, v in dict(p.boosts).items() if v}
         if boosts:
@@ -148,7 +161,9 @@ def describe_pokemon(p, *, revealed_moves: bool = False) -> str:
     return " ".join(parts)
 
 
-def snapshot(battle: "AbstractBattle") -> str:
+def snapshot(
+    battle: "AbstractBattle", profile: "FormatProfile | None" = None
+) -> str:
     """Compact full-battle state as text (what the model should know now)."""
     lines = [f"Turn {battle.turn} | {battle.format}"]
     if battle.weather:
@@ -161,7 +176,7 @@ def snapshot(battle: "AbstractBattle") -> str:
         lines.append("Opponent side: " + ", ".join(_name(s) for s in battle.opponent_side_conditions))
 
     if is_doubles(battle):
-        lines.extend(_snapshot_doubles(battle))
+        lines.extend(_snapshot_doubles(battle, profile))
     else:
         active = battle.active_pokemon
         lines.append(f"Your active: {describe_pokemon(active) if active else 'none'}")
@@ -205,7 +220,9 @@ def snapshot(battle: "AbstractBattle") -> str:
     return "\n".join(lines)
 
 
-def _snapshot_doubles(battle: "DoubleBattle") -> list[str]:
+def _snapshot_doubles(
+    battle: "DoubleBattle", profile: "FormatProfile | None" = None
+) -> list[str]:
     """Slot-labelled field state plus the speed-order line (doubles only)."""
     lines: list[str] = []
     for i, p in enumerate(battle.active_pokemon):
@@ -231,7 +248,7 @@ def _snapshot_doubles(battle: "DoubleBattle") -> list[str]:
                 pass
     for p in battle.opponent_active_pokemon:
         if p is not None and not p.fainted:
-            entries.append((_speed_estimate(p), p.species, "foe~"))
+            entries.append((_speed_estimate(p, profile), p.species, "foe~"))
     if entries:
         entries.sort(key=lambda e: -e[0])
         bits = [
@@ -242,19 +259,82 @@ def _snapshot_doubles(battle: "DoubleBattle") -> list[str]:
     return lines
 
 
-def available_actions(battle: "AbstractBattle") -> str:
+def _request_move_info(battle: "AbstractBattle") -> dict[str, dict[str, Any]]:
+    """Move id -> request fields (``pp``/``maxpp``) from the last request.
+
+    poke-env's ``Move.max_pp`` uses the mainline PP formula and the request's
+    PP is never written back, so Champions (cap 20 + its own PP-Up formula)
+    must be read from the server request for an accurate display.
+    """
+    request = getattr(battle, "_last_request", None) or {}
+    out: dict[str, dict[str, Any]] = {}
+    active = request.get("active")
+    blocks = active if isinstance(active, list) else [request]
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        for move in block.get("moves") or []:
+            if isinstance(move, dict) and move.get("id"):
+                out[str(move["id"])] = move
+    return out
+
+
+def _move_line(
+    move,
+    *,
+    data: "ShowdownData | None" = None,
+    profile: "FormatProfile | None" = None,
+    request_info: dict[str, dict[str, Any]] | None = None,
+    prefix: str = "  - ",
+    targets: list[str] | None = None,
+) -> str:
+    """One available-move line; Champions values come from the data overlay."""
+    champions = profile is not None and profile.is_champions
+    entry = (data.move(move.id) if champions and data is not None else None) or {}
+    type_name = str(entry.get("type") or _name(move.type)).upper() if champions else _name(move.type)
+    category = str(entry.get("category") or _name(move.category)) if champions else _name(move.category)
+    if champions and "basePower" in entry:
+        damage = f"BP {entry.get('basePower')}"
+    else:
+        damage = f"fixed {move.damage}" if move.damage else f"BP {move.base_power}"
+    accuracy = entry.get("accuracy", move.accuracy) if champions else move.accuracy
+    if accuracy is True:
+        accuracy = "always"
+    priority = entry.get("priority", move.priority) if champions else move.priority
+    pp, maxpp = move.current_pp, move.max_pp
+    if champions and request_info:
+        req = request_info.get(move.id) or {}
+        pp = req.get("pp", pp)
+        maxpp = req.get("maxpp", maxpp)
+    suffix = f" | targets: {','.join(targets)}" if targets is not None else ""
+    return (
+        f"{prefix}{move.id} | type {type_name} | {damage}"
+        f" | {category} | acc {accuracy} | PP {pp}/{maxpp}"
+        f" | prio {priority}{suffix}"
+    )
+
+
+def available_actions(
+    battle: "AbstractBattle",
+    *,
+    data: "ShowdownData | None" = None,
+    profile: "FormatProfile | None" = None,
+) -> str:
     """Enumerate the legal actions of this decision point."""
     if is_doubles(battle):
-        return _available_actions_doubles(battle)
+        return _available_actions_doubles(battle, data=data, profile=profile)
+    request_info = _request_move_info(battle)
     lines: list[str] = []
     if battle.available_moves:
         lines.append("Moves:")
         for m in battle.available_moves:
-            damage = f"fixed {m.damage}" if m.damage else f"BP {m.base_power}"
             lines.append(
-                f"  - {m.id} | type {_name(m.type)} | {damage}"
-                f" | {_name(m.category)} | acc {m.accuracy} | PP {m.current_pp}/{m.max_pp}"
-                f" | prio {m.priority}"
+                _move_line(
+                    m,
+                    data=data,
+                    profile=profile,
+                    request_info=request_info,
+                )
             )
     if battle.available_switches:
         lines.append("Switches:")
@@ -265,6 +345,8 @@ def available_actions(battle: "AbstractBattle") -> str:
     notes = []
     if getattr(battle, "can_tera", False):
         notes.append("terastallization available (pass terastallize=true with a move)")
+    if getattr(battle, "can_mega_evolve", False):
+        notes.append("mega evolution available (pass mega=true with a move)")
     if battle.trapped:
         notes.append("you are trapped — switching is not possible")
     if notes:
@@ -272,7 +354,12 @@ def available_actions(battle: "AbstractBattle") -> str:
     return "\n".join(lines)
 
 
-def _available_actions_doubles(battle: "DoubleBattle") -> str:
+def _available_actions_doubles(
+    battle: "DoubleBattle",
+    *,
+    data: "ShowdownData | None" = None,
+    profile: "FormatProfile | None" = None,
+) -> str:
     """Per-slot legal actions with symbolic targets (doubles only)."""
     lines: list[str] = ["Spread moves hit both foes at 0.75x power."]
     forced = list(battle.force_switch)
@@ -303,13 +390,18 @@ def _available_actions_doubles(battle: "DoubleBattle") -> str:
         moves = battle.available_moves[i]
         if moves:
             lines.append("  Moves:")
+            request_info = _request_move_info(battle)
             for m in moves:
-                damage = f"fixed {m.damage}" if m.damage else f"BP {m.base_power}"
                 targets = move_target_symbols(battle, m, i)
                 lines.append(
-                    f"    - {m.id} | type {_name(m.type)} | {damage}"
-                    f" | {_name(m.category)} | acc {m.accuracy} | PP {m.current_pp}/{m.max_pp}"
-                    f" | prio {m.priority} | targets: {','.join(targets)}"
+                    _move_line(
+                        m,
+                        data=data,
+                        profile=profile,
+                        request_info=request_info,
+                        prefix="    - ",
+                        targets=targets,
+                    )
                 )
         switches = battle.available_switches[i]
         if switches:
@@ -321,6 +413,8 @@ def _available_actions_doubles(battle: "DoubleBattle") -> str:
         notes = []
         if battle.can_tera[i]:
             notes.append("terastallization available (terastallize=true with a move)")
+        if battle.can_mega_evolve[i]:
+            notes.append("mega evolution available (mega=true with a move)")
         if battle.trapped[i]:
             notes.append("trapped — switching is not possible")
         if notes:

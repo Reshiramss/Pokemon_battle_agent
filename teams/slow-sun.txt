@@ -1,3 +1,4 @@
+# format: standard
 # name: Slow Sun
 # archetype: trick_room
 # description: Calyrex-Ice Trick Room. Glacial Lance hits both foes under TR; Torkoal

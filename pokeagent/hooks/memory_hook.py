@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from ..knowledge.static import normalize_name
 from ..memory.keys import opponent_key, our_team_key
-from ..memory.store import MemoryStore
+from ..memory.store import MemoryStore, memory_root
 from ..memory.tactics import tactic_ids
 from .base import PreDecisionHook
 
@@ -31,10 +31,16 @@ class MemoryHook(PreDecisionHook):
 
     name = "memory"
 
-    def __init__(self, config: "AgentConfig", store: MemoryStore | None = None):
+    def __init__(
+        self,
+        config: "AgentConfig",
+        store: MemoryStore | None = None,
+        profile=None,
+    ):
         self.config = config
+        self.profile = profile
         self.store = store or MemoryStore(
-            getattr(config, "memory_path", None) or "runs/_memory",
+            memory_root(config, profile),
             lines_cap=getattr(config, "memory_lines_cap", 500),
         )
 

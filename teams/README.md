@@ -12,14 +12,24 @@ a VGC battle must bring a team — challenges without one are rejected.
 | `crowned-balance.txt` | Crowned Balance | balance (Zacian/Zamazenta crowned core) |
 | `rain-rush.txt` | Rain Rush | rain offense (Kyogre + Swift Swim) |
 | `slow-sun.txt` | Slow Sun | Trick Room (Calyrex-Ice + Torkoal) |
+| `champions-a.txt` | Champions A | generated legal Champions pool |
+| `champions-b.txt` | Champions B | second legal Champions team (AI vs AI) |
 
 Each file is one Showdown **packed team** on the non-comment lines, with `#`
-comment headers (`# name:`, `# archetype:`, `# description:`) parsed by
-`pokeagent/teams.py`. Validate against the format before running:
+comment headers (`# name:`, `# archetype:`, `# description:`, `# format:`)
+parsed by `pokeagent/teams.py`. `# format: standard` / `# format: champions`
+keeps `run_battle.py` from pairing a Champion battle with a standard team;
+untagged files are wildcards.
+
+Champion teams use **Stat Points**, not EVs: the packed `evs` field holds
+0–32 per stat, total ≤66, IVs must be 31, level 50. They also obey Champion
+Item Clause and deliberately avoid Restricted Legendary (Flat Rules).
+
+Validate against the right format before running:
 
 ```sh
-node scripts/validate_teams.js                    # all files
-node scripts/validate_teams.js gen9vgc2025regihidden
+node scripts/validate_teams.js                    # standard files
+node scripts/validate_teams.js gen9championsvgc2026regmc   # champion files
 ```
 
 ## Using a team
