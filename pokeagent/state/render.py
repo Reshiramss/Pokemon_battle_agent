@@ -45,6 +45,9 @@ def _describe(node: MonNode, *, revealed_moves: bool = False) -> str:
             + ",".join(f"{key}{value:+d}" for key, value in node.boosts.items())
             + "}"
         )
+    # mirrors ``records.describe_pokemon``: only confirmed abilities render
+    if node.known_ability:
+        parts.append(f"ability:{node.known_ability}")
     if node.item_raw:
         parts.append(f"item:{node.item_raw}")
     if revealed_moves and node.revealed_moves:

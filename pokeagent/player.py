@@ -182,14 +182,19 @@ class PokeAgent(Player):
         return tools
 
     def _default_hooks(self) -> HookSystem:
+        from .hooks.ability_effects_hook import AbilityEffectsHook
         from .hooks.battle_kb_hook import BattleKBHook
         from .hooks.mechanics_hook import MechanicsHook
+        from .hooks.move_effects_hook import MoveEffectsHook
         from .hooks.smogon_usage_hook import SmogonUsageHook
         from .hooks.static_kb_hook import TypeMatchupHook
 
         hooks = HookSystem()
         hooks.register_pre(BattleKBHook())
+        # ability/move effect text: [NOW] names them, these explain them
+        hooks.register_pre(AbilityEffectsHook())
         hooks.register_pre(TypeMatchupHook())
+        hooks.register_pre(MoveEffectsHook())
         hooks.register_pre(MechanicsHook())
         hooks.register_pre(SmogonUsageHook(self.config))
         if self.config.enable_memory:
