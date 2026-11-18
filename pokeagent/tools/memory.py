@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..memory.store import LEVELS, MemoryStore
+from ..memory.store import LEVELS, MemoryStore, memory_root
 from .base import Tool, ToolContext, ToolError
 
 if TYPE_CHECKING:
@@ -27,13 +27,15 @@ def _clip(text: str) -> str:
     return text[:MAX_RESULT_CHARS] + " …[truncated]"
 
 
-def _store(config: "AgentConfig | None") -> MemoryStore:
+def _store(config: "AgentConfig | None", profile=None) -> MemoryStore:
     if config is None:
         raise ToolError("memory is unavailable: no agent config")
     if not getattr(config, "enable_memory", False):
         raise ToolError("cross-battle memory is disabled in this agent config")
-    root = Path(getattr(config, "memory_path", None) or "runs/_memory")
-    return MemoryStore(root, lines_cap=getattr(config, "memory_lines_cap", 500))
+    return MemoryStore(
+        memory_root(config, profile),
+        lines_cap=getattr(config, "memory_lines_cap", 500),
+    )
 
 
 class MemorySearchTool(Tool):
@@ -101,7 +103,7 @@ class MemorySearchTool(Tool):
         limit = max(1, min(int(limit), 50))
         if level not in ("all", *LEVELS):
             raise ToolError(f"unknown level {level!r}; use: all, {', '.join(LEVELS)}")
-        store = _store(config)
+        store = _store(config, getattr(ctx.kb, "profile", None))
         try:
             lines, total = store.search(
                 query, level=level, key=key, limit=limit, regex=regex
@@ -130,7 +132,7 @@ class MemoryStatsTool(Tool):
     input_schema = {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, ctx: ToolContext) -> str:
-        store = _store(ctx.config)
+        store = _store(ctx.config, getattr(ctx.kb, "profile", None))
         stats = store.stats()
         grand = sum(v["total"] for v in stats.values())
         if grand == 0:

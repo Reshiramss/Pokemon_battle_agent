@@ -1,3 +1,4 @@
+# format: standard
 # name: Crowned Balance
 # archetype: balance
 # description: Zacian-Crowned + Zamazenta-Crowned balance core. Intrepid Sword and

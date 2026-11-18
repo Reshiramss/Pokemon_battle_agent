@@ -1,0 +1,5 @@
+# name: Champions B
+# archetype: generated legal Champions pool (variant)
+# format: champions
+# description: Second legal Champions team for AI-vs-AI: same pool species, different items/moves, Item Clause clean, validated for [Gen 9 Champions] VGC 2026 Reg M-C. EVs are Stat Points (0-32, total 66); level 50.
+Farfetch’d||Leek|Defiant|bravebird,knockoff,closecombat,protect||11,11,11,11,11,11|F|||50|]Arbok||Leftovers|Intimidate|gunkshot,glare,protect,knockoff||11,11,11,11,11,11|M|||50|]Thievul||BlackGlasses|Stakeout|darkpulse,snarl,partingshot,protect||11,,11,11,11,11|F|||50|]Pangoro||LifeOrb|Scrappy|closecombat,knockoff,partingshot,protect||11,11,11,11,11,11|M|||50|]Raichu|RaichuAlola|FocusSash|SurgeSurfer|thunderbolt,psychic,fakeout,protect||11,11,11,11,11,11|M|||50|]Venusaur||Venusaurite|Chlorophyll|gigadrain,sludgebomb,protect,sleeppowder||11,11,11,11,11,11|M|||50|

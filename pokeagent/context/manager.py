@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..formats import FormatProfile, profile_for
 from ..providers.base import UserMessage
 from ..state.model import (
     BattleState,
@@ -56,7 +57,9 @@ target=<one of that move's listed targets: auto/self/ally/opp1/opp2>.
 Choose ONLY from the listed options; anything else is rejected and you lose time.
 - Singles: submit exactly one action (slot is ignored). \
 Doubles: submit one action per active slot that has choices; slots shown as pass auto-pass.
-- Pass terastallize=true only when the notes say it is available and it is the better play.
+- Pass terastallize=true / mega=true only when the notes say that gimmick is \
+available and it is the better play. Champions formats have no Tera; Mega works \
+only when the notes say so.
 - Optional `reasoning_update`: when your plan changes (a threat is answered, the \
 old line failed), send `win_conditions` (<=2), `commitments` (<=3) and/or `correction` \
 to rewrite your committed plan. `[STRATEGY]` is your rolling brief — it is a summary, \
@@ -116,10 +119,12 @@ class ContextManager:
         config: "AgentConfig",
         kb=None,
         label: str | None = None,
+        profile: FormatProfile | None = None,
     ):
         self.config = config
         self.battle_tag = battle_tag
         self.kb = kb
+        self.profile = profile or profile_for(config.battle_format)
         self.intel = IntelStore()
         self.records: list[TurnRecord] = []
         self.seen_species: set[str] = set()
@@ -140,6 +145,8 @@ class ContextManager:
             "battle_start",
             battle_tag=battle_tag,
             format=config.battle_format,
+            mod=self.profile.mod,
+            stat_model=self.profile.stat_model,
             model=config.model,
         )
 
@@ -185,6 +192,8 @@ class ContextManager:
                 "started": ts,
                 "battle_tag": self.battle_tag,
                 "format": self.config.battle_format,
+                "mod": self.profile.mod,
+                "stat_model": self.profile.stat_model,
                 "provider": self.config.provider,
                 "model": self.config.model,
                 "config": config_dict,
@@ -624,9 +633,15 @@ class ContextManager:
         player has initialized state.
         """
         board = (
-            render_observed(self.state) if self.state is not None else snapshot(battle)
+            render_observed(self.state, profile=self.profile)
+            if self.state is not None
+            else snapshot(battle, profile=self.profile)
         )
-        now = board + "\n\nAvailable actions:\n" + available_actions(battle)
+        now = board + "\n\nAvailable actions:\n" + available_actions(
+            battle,
+            data=getattr(self.kb, "data", None),
+            profile=self.profile,
+        )
         self.last_now_text = now
         return now
 
@@ -701,6 +716,29 @@ class ContextManager:
                 parts.append("\n".join(lines))
         return "\n\n".join(parts) if parts else None
 
+    def _rules_text(self) -> str | None:
+        """Mode-specific rules reminder (currently Champions only)."""
+        profile = self.profile
+        if not profile.is_champions:
+            return None
+        lines = ["[RULES — Champions format]"]
+        if profile.uses_stat_points:
+            lines.append(
+                "Stats use stat points, not EVs/IVs or level: HP = base + "
+                "points + 75; other stats = base + points + 20, then nature. "
+                "Stat points are 0-32 per stat and 66 total."
+            )
+        else:
+            lines.append(
+                "Stats use the mainline level formula (Level Clause Mod), "
+                "but move/item/ability data and PP are Champions rules."
+            )
+        lines.append("Tera is disabled. Mega Evolution is available when the "
+                     "action notes say so (mega=true with a move).")
+        if profile.pp_cap:
+            lines.append(f"Move PP is capped at {profile.pp_cap}.")
+        return "\n".join(lines)
+
     def assemble_prompt(self, battle: "AbstractBattle", hook_fragments: list[str]):
         """Build (system, messages) for this decision point."""
         sections: list[str] = []
@@ -709,6 +747,10 @@ class ContextManager:
             f"\nYou are {battle.player_username}; opponent: {battle.opponent_username}"
         )
         sections.append(f"[BATTLE INFO]\n{info}")
+
+        rules = self._rules_text()
+        if rules:
+            sections.append(rules)
 
         intel = self.intel.latest()
         if intel:

@@ -27,6 +27,7 @@ from poke_env.player import RandomPlayer, SimpleHeuristicsPlayer
 from poke_env.ps_client.account_configuration import AccountConfiguration
 
 from pokeagent.config import load_config
+from pokeagent.formats import profile_for
 from pokeagent.logging_setup import setup_logging
 from pokeagent.player import PokeAgent, build_server_configuration
 from pokeagent.teams import RawTeambuilder, TeamLibrary, resolve_team
@@ -47,6 +48,12 @@ async def main() -> None:
     )
     parser.add_argument("--battles", type=int, default=1)
     parser.add_argument(
+        "--format",
+        default=None,
+        help="battle format id (overrides config.battle_format, e.g. "
+        "gen9championsvgc2026regmchidden)",
+    )
+    parser.add_argument(
         "--team",
         default=None,
         help="agent team: library name (see teams/) or raw packed team string",
@@ -61,7 +68,10 @@ async def main() -> None:
     overrides = {}
     if args.team:
         overrides["team"] = args.team
+    if args.format:
+        overrides["battle_format"] = args.format
     config = load_config(args.config, overrides=overrides or None)
+    profile = profile_for(config.battle_format)
     log_path = setup_logging(config)  # every run leaves runs/logs/agent-<ts>.log
     logger.info(
         "run_battle start: provider=%s model=%s opponent=%s battles=%d "
@@ -80,7 +90,7 @@ async def main() -> None:
     if config.team is not None:
         library = TeamLibrary.from_config(config)
         opponent_spec = args.opponent_team or library.random_other(
-            resolve_team(config.team, library)
+            resolve_team(config.team, library), profile
         ).name
         opponent_team = resolve_team(opponent_spec, library)
         logger.info("opponent team: %s", opponent_spec)

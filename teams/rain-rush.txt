@@ -1,3 +1,4 @@
+# format: standard
 # name: Rain Rush
 # archetype: rain
 # description: Kyogre rain offense. Drizzle boosts Water Spout to nuke levels;

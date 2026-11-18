@@ -178,6 +178,7 @@ def test_fallback_to_gendata_when_bundle_missing(kb, monkeypatch):
     import pokeagent.tools.static_kb as mod
 
     monkeypatch.setattr(mod, "get_showdown_data", lambda: None)
+    monkeypatch.setattr(kb, "data", None)
     ctx = make_ctx(make_battle(), kb)
 
     move = asyncio.run(MoveInfoTool(kb).execute(ctx, move="Flamethrower"))

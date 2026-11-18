@@ -168,6 +168,12 @@ def speed_bounds(
             flush()
             skip_turn = True
             continue
+        if cmd in ("-mega",):
+            # Mega Evolution can change base Speed and the ability; the turn's
+            # action order says nothing about the post-Mega speed stat.
+            flush()
+            skip_turn = True
+            continue
         if cmd in ("-fieldstart", "-fieldend"):
             if "trick" in args[0].lower() or "room" in args[0].lower():
                 flush()
@@ -369,7 +375,7 @@ def _merge_speed_claim(
         parts.append(f"< {high}")
     if not parts:
         return low, high
-    text = f"speed {' and '.join(parts)} (level-50 stat; from turn order)"
+    text = f"speed {' and '.join(parts)} (stat; from turn order)"
     if existing is None:
         claim = Claim(
             subject=species,

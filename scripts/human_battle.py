@@ -12,9 +12,11 @@ Steps:
     1. Start the local Showdown server on port 8964 (see README).
     2. Run this script — the agent logs in as PokeAgent and waits.
     3. Open http://localhost:8964 in a browser, pick any username, then
-       challenge the user PokeAgent to "[Gen 9] VGC 2025 Reg I (Hidden)"
-       (it is listed in the challenge dropdown). With --wait-for set, only
-       that username is accepted.
+       challenge the user PokeAgent to the configured format's display name
+       ("[Gen 9] VGC 2025 Reg I (Hidden)" by default; for Champion mode use
+       "--format gen9championsvgc2026regmchidden" and challenge
+       "[Gen 9 Champions] VGC 2026 Reg M-C (Hidden)"). With --wait-for set,
+       only that username is accepted.
     4. Play your 6-pick-4 doubles game; the agent picks leads and moves
        like in any other battle.
     5. After each game the agent waits for the next challenge, up to
@@ -42,6 +44,11 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=None, help="path to a config.toml")
     parser.add_argument(
+        "--format",
+        default=None,
+        help="battle format id (overrides config.battle_format)",
+    )
+    parser.add_argument(
         "--team",
         default=None,
         help="agent team: library name (see teams/) or raw packed team string",
@@ -56,8 +63,12 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    overrides = {"team": args.team} if args.team else None
-    config = load_config(args.config, overrides=overrides)
+    overrides = {}
+    if args.team:
+        overrides["team"] = args.team
+    if args.format:
+        overrides["battle_format"] = args.format
+    config = load_config(args.config, overrides=overrides or None)
     log_path = setup_logging(config)
     logger.info(
         "human_battle start: provider=%s model=%s server=%s:%d format=%s team=%s",

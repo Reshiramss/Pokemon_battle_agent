@@ -1,3 +1,4 @@
+# format: standard
 # name: Shadow Bolt
 # archetype: hyper_offense
 # description: Calyrex-Shadow + Miraidon hyper offense. Astral Barrage and Electro

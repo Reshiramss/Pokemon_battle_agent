@@ -11,6 +11,7 @@
 - **双打 6 选 4 全流程（VGC 规则）**：队伍预览阶段用 `submit_team` 从 6 只中选 4 只携带（前 2 为首发）；对战内每回合 `submit_decision` 提交双槽动作，出招带符号目标（`opp1/opp2/ally/self`），与 `get_possible_showdown_targets` 校验一致。对手信息只显示 6 只种类，招式/道具/特性随对战逐步揭示。
 - **永不超时判负**：每个决策有硬时间预算，超时或出错自动回退随机出招——质量降级，但绝不因超时输掉对战。
 - **全程落盘，可复现**：每场对战自动留下完整记录——逐回合的决策与理由、模型的逐字思考过程（CoT）、以及模型看到的**完整对话轨迹**（`llm.jsonl`，prompt/响应/工具结果逐字复现）。
+- **双模式**：同一套 agent 支持常规 Gen 9 与 Pokémon Showdown `champions` mod；`FormatProfile` 自动切换数值模型（EV/IV vs Stat Points）、静态数据（mod 覆盖表）、Tera/Mega 与 PP 规则，通过 `battle_format` 或 `--format` 选择。
 - **可插拔后端**：任何 OpenAI 兼容端点（vLLM、Ollama、各类网关、官方 API）或 Anthropic；Provider / Tool / Hook / SubAgent / Compressor 全部是抽象接口，实现 + 注册即可扩展。
 - **速度与成本设计**：决策关键路径零子 agent；威胁分析、战后复盘、历史压缩全部跑在后台的便宜模型上，摘要注入后续决策，不阻塞对战。
 
@@ -147,6 +148,27 @@ postmortem 每场输出一行，例如：
 
 进程级日志在 `runs/logs/agent-<时间戳>.log`，框架全部 logging（provider 报错、hook 失败、子 agent 异常）都会落盘。
 
+## Champion 模式
+
+框架同时支持 Pokémon Showdown 的 `champions` mod。Champion 规则下：
+
+- 数值用 **Stat Points**（每项 0–32、总和 ≤66），不受 level/IV 影响；
+- **无 Tera、有 Mega Evolution**（`submit_decision` 的 `mega=true`，每回合一次）；
+- PP 上限 20，moves/items/abilities/formats-data 使用 Champion 覆盖表；
+- 队伍必须 Champion 合法（`teams/champions-a.txt` / `champions-b.txt` 已带）。
+
+```bash
+# 自定义隐藏 Champion VGC 格式（6 选 4、隐藏配置、AI 友好计时器）
+python scripts/run_battle.py \
+    --format gen9championsvgc2026regmchidden \
+    --team "Champions A" --opponent agent --battles 1
+
+# 官方格式（VGC Timer；agent 多轮调用可能超时）
+python scripts/run_battle.py --format gen9championsvgc2026regmc --team "Champions A"
+```
+
+自定义 Champion 格式在 `server/custom-formats.ts`，安装后需 `node build` 并重启 8964 服务器。完整说明（数据重导出、队伍 Stat Points、记忆分区、测试）见 `README.dev.md` 的“Champion 模式”一节。
+
 ## 配置
 
 `config.toml`（从 `config.example.toml` 复制）中的 `[agent]` 节可覆盖全部默认值，常用项：
@@ -170,11 +192,13 @@ postmortem 每场输出一行，例如：
 
 ```bash
 python -m pytest tests/ -q                                          # 全部（e2e 需本地服务器在跑）
-python -m pytest tests/ -q --ignore=tests/test_e2e_loop.py          # 纯离线
+python -m pytest tests/ -q --ignore=tests/test_e2e_loop.py \
+    --ignore=tests/test_e2e_doubles.py --ignore=tests/test_e2e_champions.py   # 纯离线
 ```
 
-其中两个 e2e 测试是**零 token 真实对战**（单打 + 双打 AI vs AI）：用 stub provider 跑完整协议、
-落盘、复盘全链路；双打 e2e 验收 6 选 4 预览合法、双槽决策带目标、零回退回合、双方记录目录独立。
+三个 e2e 测试是**零 token 真实对战**（单打 / 双打 / Champion 双打 AI vs AI）：用 stub provider 跑完整协议、
+落盘、复盘全链路；双打 e2e 验收 6 选 4 预览合法、双槽决策带目标、零回退回合、双方记录目录独立；
+Champion e2e 额外验收 Stat Points、PP≤20、无 Tera 与 state/meta 落盘。
 
 ## 架构一览
 
@@ -206,3 +230,4 @@ Showdown 服务器 ──▶ PokeAgent（poke-env Player 子类）
 
 - **蒸馏他人知识**：从高分对战记录/解说中提炼决策知识并入库（`mechanics.json` / `team_comps.json` 的扩展或新增知识模块）。
 - **人机对战实测**：`scripts/human_battle.py` 已写好（见上文第 4 步），等待真实浏览器挑战的端到端验证。
+- **知识加载缺口（技能效果 / 特性 / 道具）**：`[NOW]` 只给招式元数据，效果文本依赖模型主动 `move_info`（实测 125 个决策点只查 1 次）。待办：P0 在 prompt 中显示我方特性；P1 注入可用/已揭示招式的 `shortDesc`；P2 补 `item_info`/道具效果与 `submit_decision` 软校验警告。详见 `README.dev.md` 的 TODO。

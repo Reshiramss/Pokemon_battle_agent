@@ -21,15 +21,18 @@ from poke_env.ps_client.server_configuration import (
     ServerConfiguration,
     ShowdownServerConfiguration,
 )
+from poke_env.teambuilder import Teambuilder
 
 from .config import AgentConfig
+from .formats import FormatProfile, profile_for
+from .stats import own_stats
 from .context.brief import LLMBriefCompressor
 from .context.compressor import LLMCompressor
 from .context.manager import ContextManager
 from .context.reasoning import DeterministicNoteExtractor, LLMNoteExtractor
 from .context.records import TurnRecord, preview_pick_count
 from .hooks.base import HookSystem
-from .knowledge.static import StaticKB
+from .knowledge.static import StaticKB, normalize_name
 from .knowledge.tree import BattleKB
 from .loop import AgentLoop, TurnAbort, TurnOutcome
 from .providers import get_provider
@@ -90,6 +93,8 @@ class PokeAgent(Player):
         if team is None and config.team is not None:
             self.team_library = TeamLibrary.from_config(config)
             team = resolve_team(config.team, self.team_library)
+        packed_team = team if isinstance(team, str) else getattr(team, "_packed", None)
+        self._team_sets = self._parse_team_sets(packed_team)
         if isinstance(team, str):
             team = RawTeambuilder(team)
         if team is not None:
@@ -99,7 +104,8 @@ class PokeAgent(Player):
         # client starts on its own thread's event loop immediately, and on
         # login it can replay a still-running battle — choose_move would
         # otherwise run against a half-constructed instance.
-        self.kb = kb or StaticKB(config.battle_format)
+        self.profile: FormatProfile = profile_for(config.battle_format)
+        self.kb = kb or StaticKB(config.battle_format, profile=self.profile)
         self.provider = provider or get_provider(config)
         self.registry = registry if registry is not None else self._default_registry()
         self.hooks = hooks if hooks is not None else self._default_hooks()
@@ -189,7 +195,7 @@ class PokeAgent(Player):
         if self.config.enable_memory:
             from .hooks.memory_hook import MemoryHook
 
-            hooks.register_pre(MemoryHook(self.config))
+            hooks.register_pre(MemoryHook(self.config, profile=self.profile))
         return hooks
 
     # --- poke-env lifecycle ---------------------------------------------------
@@ -202,6 +208,7 @@ class PokeAgent(Player):
                 config=self.config,
                 kb=self.kb,
                 label=getattr(self, "username", None),
+                profile=self.profile,
             )
             # background history compression on the cheap model
             if self.runner is not None and self.runner.provider is not None:
@@ -286,6 +293,7 @@ class PokeAgent(Player):
         stays a live alias for the hooks. Never blocks the battle: state is an
         aid, not a dependency.
         """
+        self._align_own_stats(battle)
         try:
             if cm.state is None:
                 cm.state = BattleState.create(battle, self.kb, ledger=cm.ledger)
@@ -308,6 +316,69 @@ class PokeAgent(Player):
                 cm.save_battle_kb()
             except Exception:
                 logger.debug("battle_kb refresh failed", exc_info=True)
+
+    @staticmethod
+    def _parse_team_sets(packed: str | None) -> dict:
+        """Species -> TeambuilderPokemon, for stat-point recomputation.
+
+        The server request does not carry EVs/Stat Points, and poke-env may
+        rebuild our team from the request without the teambuilder sets. Keep
+        the packed sets so Champions can recompute exact stats at preview and
+        after Mega Evolution.
+        """
+        if not packed:
+            return {}
+        try:
+            sets = Teambuilder.parse_packed_team(packed)
+        except Exception:
+            return {}
+        out = {}
+        for set_ in sets:
+            for name in (
+                getattr(set_, "species", None),
+                getattr(set_, "nickname", None),
+            ):
+                if name:
+                    out[normalize_name(name)] = set_
+        return out
+
+    def _align_own_stats(self, battle: "AbstractBattle") -> None:
+        """Recompute our side's stats under the profile's stat model.
+
+        poke-env computes mainline stats from the teambuilder set before the
+        server request arrives. Champions uses stat points instead, and its
+        Mega Evolution updates ``base_stats`` without touching ``stats`` — so
+        both cases are fixed here before the state tree / damage calc read them.
+        """
+        try:
+            for mon in battle.team.values():
+                key = (
+                    self.kb.species_key(mon.species)
+                    if self.kb is not None
+                    else normalize_name(mon.species)
+                )
+                set_ = self._team_sets.get(key) or self._team_sets.get(
+                    normalize_name(getattr(mon, "species", ""))
+                )
+                points = getattr(set_, "evs", None) if set_ else None
+                if (
+                    self.profile.uses_stat_points
+                    and points is None
+                    and getattr(mon, "evs", None) is None
+                ):
+                    # No set source: keep the server-provided stats rather
+                    # than overwriting them with a 0-point assumption.
+                    continue
+                stats = own_stats(
+                    self.profile,
+                    mon,
+                    stat_points=points,
+                    nature=getattr(set_, "nature", None) if set_ else None,
+                )
+                if stats and len(stats) == 6:
+                    mon.stats = stats
+        except Exception:
+            logger.debug("own-stat alignment failed", exc_info=True)
 
     async def _record_fallback(
         self, battle, cm: ContextManager, ctx: ToolContext, reason: str, started: float
@@ -423,6 +494,7 @@ class PokeAgent(Player):
             cm.state.meta.preview_pick = limit
             cm.state.meta.preview_order = list(members)
             try:
+                self._align_own_stats(battle)
                 cm.state.refresh(battle, self.kb)
                 cm.battle_kb = cm.state.kb
                 cm.save_battle_kb()
@@ -455,7 +527,7 @@ class PokeAgent(Player):
         if self.config.enable_memory:
             from .memory.writer import MemoryWriter
 
-            writer = MemoryWriter(self.config)
+            writer = MemoryWriter(self.config, profile=self.profile)
             counts = writer.write_battle(battle, cm)
             cm.log_event("memory_written", **counts)
         if self.runner is not None:

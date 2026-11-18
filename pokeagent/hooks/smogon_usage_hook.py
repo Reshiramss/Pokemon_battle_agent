@@ -43,6 +43,16 @@ class SmogonUsageHook(PreDecisionHook):
     async def run(self, ctx: ToolContext) -> str | None:
         if not self.config.enable_smogon_hook:
             return None
+        profile = getattr(getattr(ctx, "kb", None), "profile", None)
+        if (
+            profile is not None
+            and profile.is_champions
+            and not self.config.smogon_stats_snapshot
+            and not self.config.smogon_stats_format
+        ):
+            # No Champions ladder snapshot exists yet; never fall back to a
+            # standard Gen 9 ladder's usage rows for a Champion battle.
+            return None
         stats = await self._get_stats()
         if stats is None:
             return None
@@ -125,5 +135,9 @@ class SmogonUsageHook(PreDecisionHook):
             return fmt
         battle = self.config.battle_format
         if battle.endswith("hidden"):
-            return battle[: -len("hidden")]  # gen9vgc2025regihidden -> gen9vgc2025regi
+            battle = battle[: -len("hidden")]  # gen9vgc2025regihidden -> gen9vgc2025regi
+        if "champions" in battle:
+            # There is no standard Smogon ladder for Champion formats yet;
+            # an explicit smogon_stats_format is required to fetch usage.
+            return ""
         return battle

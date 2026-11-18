@@ -121,6 +121,18 @@
         "Two foes at equal speed to you: you can still be outsped by either via the random tie.",
         "Level 50 flat rules: damage variance is +/-15%; EVs are halved in effect (4 EVs = 1 stat point at 50)."
       ]
+    },
+    "champions": {
+      "title": "Pokemon Champions rules",
+      "aliases": ["champions", "stat points", "champion mode", "mega evolution"],
+      "summary": "Champions replaces EV/IV/level stats with Stat Points (0-32 per stat, 66 total), disables Tera, enables Mega Evolution, caps PP at 20, and uses its own move/item data.",
+      "details": [
+        "Stat formula: HP = base + stat points + 75; other stats = base + stat points + 20, then the nature multiplier (x1.1 / x0.9, truncated). Level and IVs do not enter the Champions formula.",
+        "The packed team's EVs field holds Stat Points, not EVs: 0-32 per stat and 66 total; IVs must be 31. Item Clause = 1.",
+        "Tera is disabled. Mega Evolution is available for a Pokemon holding its mega stone (one per turn; pass mega=true with a move).",
+        "Move PP is capped at 20 (and PP-Up uses the Champions formula). Moves, items, abilities and legal species follow the Champions data, not mainline Gen 9.",
+        "Champion random-battle formats carry Level Clause Mod and therefore still use the mainline level-based stat formula; VGC/OU formats use Stat Points."
+      ]
     }
   },
   "context_lines": {

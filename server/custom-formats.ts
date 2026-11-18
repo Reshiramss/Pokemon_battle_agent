@@ -41,4 +41,25 @@ exports.Formats = [
 		],
 		restricted: ['Restricted Legendary'],
 	},
+	{
+		/**
+		 * Champions variant of the hidden VGC format. Same information model
+		 * and AI-friendly timer as the standard hidden format, but with the
+		 * champions mod (stat points instead of EVs/IVs, no Tera, Mega
+		 * Evolution, PP cap 20). Flat Rules already bans Restricted
+		 * Legendary and applies Item Clause = 1.
+		 */
+		name: "[Gen 9 Champions] VGC 2026 Reg M-C (Hidden)",
+		mod: 'champions',
+		gameType: 'doubles',
+		searchShow: false,
+		bestOfDefault: true,
+		ruleset: [
+			'Flat Rules', 'Min Source Gen = 9',
+			'Timer Starting = 1200', 'Timer Grace = 300', 'Timer Add Per Turn = 30',
+			'Timer Max Per Turn = 1200', 'Timer Max First Turn = 1200',
+			'Timeout Auto Choose', 'DC Timer Bank',
+			'Open Team Sheets',
+		],
+	},
 ];

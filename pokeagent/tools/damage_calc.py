@@ -24,6 +24,26 @@ from poke_env.calc.damage_calc_gen9 import calculate_damage
 from ..knowledge.static import normalize_name
 from .base import Tool, ToolContext, ToolError
 
+
+class ModeMove(Move):
+    """A Move whose static entry comes from the format bundle.
+
+    Champions changes some move base powers/types and caps PP; poke-env's
+    ``Move`` reads the mainline GenData table. Overriding ``entry`` per
+    instance keeps the global GenData untouched, so a standard and a
+    Champion battle can coexist in one process.
+    """
+
+    __slots__ = ("_entry",)
+
+    def __init__(self, move_id: str, gen: int, entry: dict):
+        self._entry = entry
+        super().__init__(move_id=move_id, gen=gen)
+
+    @property
+    def entry(self) -> dict:
+        return self._entry
+
 if TYPE_CHECKING:
     from poke_env.battle import AbstractBattle, Pokemon
 
@@ -249,15 +269,32 @@ class DamageCalcTool(Tool):
         return clone
 
     def _resolve_move(self, ctx: ToolContext, pokemon: "Pokemon", move: str) -> Move:
-        """Known move of the pokemon, else any legal move by name."""
+        """Known move of the pokemon, else any legal move by name.
+
+        Champions battles wrap the move so its entry comes from the format
+        bundle (mod base powers/types/PP) instead of the mainline table.
+        """
         key = normalize_name(move)
+        profile = getattr(ctx.kb, "profile", None)
+        data = getattr(ctx.kb, "data", None)
+        champions = bool(profile and profile.is_champions and data is not None)
+        gen = int(getattr(ctx.battle, "gen", 9) or 9)
+
         known = (pokemon.moves or {}).get(key)
         if known is not None:
+            if champions:
+                entry = data.move(known.id)
+                if entry is not None:
+                    return ModeMove(known.id, gen, entry)
             return known
         from poke_env.data import GenData
 
         gen_data = GenData.from_format(ctx.battle.format)
         if key in gen_data.moves:
+            if champions:
+                entry = data.move(key)
+                if entry is not None:
+                    return ModeMove(key, gen, entry)
             return Move(key, gen=gen_data.gen)
         known_moves = sorted(pokemon.moves) if pokemon.moves else []
         raise ToolError(
@@ -277,7 +314,11 @@ class DamageCalcTool(Tool):
             return {}
         if ctx.kb is None:
             return {}
-        estimates = ctx.kb.estimate_stats(pokemon.species, pokemon.level)
+        estimates = ctx.kb.estimate_stats(
+            pokemon.species,
+            pokemon.level,
+            base_stats=getattr(pokemon, "base_stats", None),
+        )
         if not estimates:
             return {}
         originals: dict[str, int | None] = {}

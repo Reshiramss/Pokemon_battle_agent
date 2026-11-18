@@ -1,0 +1,5 @@
+# name: Champions A
+# archetype: generated legal Champions pool
+# format: champions
+# description: Test/benchmark team generated from the Showdown Champions random pool, then fixed for Item Clause and validated for [Gen 9 Champions] VGC 2026 Reg M-C. EVs are Stat Points (0-32, total 66); IVs are maxed; level 50.
+Farfetch’d||Leek|Defiant|bravebird,knockoff,closecombat,protect||11,11,11,11,11,11|F|||50|]Arbok||SitrusBerry|Intimidate|toxicspikes,glare,gunkshot,knockoff||11,11,11,11,11,11|M|||50|]Thievul||BlackGlasses|Stakeout|taunt,partingshot,snarl,darkpulse||11,,11,11,11,11|F|||50|]Pangoro||LifeOrb|Scrappy|protect,partingshot,closecombat,knockoff||11,11,11,11,11,11|M|||50|]Raichu|RaichuAlola|FocusSash|SurgeSurfer|psychic,thunderbolt,nuzzle,fakeout||11,11,11,11,11,11|M|||50|]Venusaur||Venusaurite|Chlorophyll|gigadrain,protect,knockoff,sludgebomb||11,11,11,11,11,11|M|||50|

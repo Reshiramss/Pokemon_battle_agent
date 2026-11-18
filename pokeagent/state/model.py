@@ -35,7 +35,7 @@ from ..knowledge.tree import BattleKB
 if TYPE_CHECKING:
     from poke_env.battle import AbstractBattle
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _name(value: Any) -> str:
@@ -92,6 +92,7 @@ class ResourceLedger:
     foe_hp: dict[str, float | None] = field(default_factory=dict)
     fainted: list[str] = field(default_factory=list)  # either side
     tera_used: list[str] = field(default_factory=list)
+    mega_used: list[str] = field(default_factory=list)
 
     @property
     def our_fainted_count(self) -> int:
@@ -241,6 +242,8 @@ class BattleMeta:
     doubles: bool = False
     preview_pick: int | None = None
     preview_order: list[int] = field(default_factory=list)  # /team slot numbers
+    mod: str = ""  # gen9 | champions
+    stat_model: str = ""  # standard | champions
     schema_version: int = SCHEMA_VERSION
 
 
@@ -273,12 +276,20 @@ class BattleState:
         state = cls(ledger=ledger if ledger is not None else ReasoningLedger())
         state.kb.build(battle, static_kb)
         state._sync(battle)
+        state._bind_profile(static_kb)
         return state
 
     def refresh(self, battle: "AbstractBattle", static_kb=None) -> None:
         """Bind the latest observations; never invents or forgets reveals."""
         self.kb.refresh(battle, static_kb)
         self._sync(battle)
+        self._bind_profile(static_kb)
+
+    def _bind_profile(self, static_kb=None) -> None:
+        profile = getattr(static_kb, "profile", None)
+        if profile is not None:
+            self.meta.mod = profile.mod
+            self.meta.stat_model = profile.stat_model
 
     def _sync(self, battle: "AbstractBattle") -> None:
         doubles = isinstance(battle, DoubleBattle)
@@ -292,10 +303,20 @@ class BattleState:
         if getattr(battle, "teampreview", False):
             self.meta.preview_pick = _preview_pick_count(battle)
 
-        self.ours.active = _active_species(battle, doubles=doubles, ours=True)
-        self.theirs.active = _active_species(battle, doubles=doubles, ours=False)
-        self.ours.order = [p.species for p in battle.team.values()]
-        self.theirs.order = [p.species for p in battle.opponent_team.values()]
+        self.ours.active = [
+            self.kb.key_for(s) if s else None
+            for s in _active_species(battle, doubles=doubles, ours=True)
+        ]
+        self.theirs.active = [
+            self.kb.key_for(s) if s else None
+            for s in _active_species(battle, doubles=doubles, ours=False)
+        ]
+        self.ours.order = [
+            self.kb.key_for(p.species) for p in battle.team.values()
+        ]
+        self.theirs.order = [
+            self.kb.key_for(p.species) for p in battle.opponent_team.values()
+        ]
 
         self.field.turn = battle.turn
         self.field.weather = [_name(w) for w in battle.weather]
@@ -320,6 +341,8 @@ class BattleState:
         for species, node in list(self.kb.us.items()) + list(self.kb.them.items()):
             if node.terastallized and species not in self.resources.tera_used:
                 self.resources.tera_used.append(species)
+            if node.mega_evolved and species not in self.resources.mega_used:
+                self.resources.mega_used.append(species)
 
     # --- helpers -----------------------------------------------------------
 

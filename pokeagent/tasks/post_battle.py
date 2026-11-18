@@ -26,7 +26,7 @@ Decision log (turn: decision — reason; FALLBACK marks degraded turns):
 {decisions}
 
 Write a short review (max ~150 words): the 2-3 pivotal moments, recurring \
-mistakes (bad switches, missed KOs, wasted terastallization), and the single \
+mistakes (bad switches, missed KOs, wasted gimmick — Tera or Mega), and the single \
 most important improvement for the next battle. Plain text."""
 
 
@@ -85,7 +85,7 @@ class PostBattleReviewAgent(SubAgent):
                     return
                 from ..memory.writer import MemoryWriter
 
-                writer = MemoryWriter(config)
+                writer = MemoryWriter(config, profile=getattr(cm, "profile", None))
             counts = writer.write_digest(battle, cm, text)
             cm.log_event("memory_digest_written", **counts)
         except Exception as exc:  # memory must never break the review

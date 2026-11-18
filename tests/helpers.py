@@ -213,7 +213,7 @@ class DecisionStubProvider(LLMProvider):
         )
 
 
-def make_battle(*, with_moves: bool = True) -> AbstractBattle:
+def make_battle(*, with_moves: bool = True, can_mega: bool = False) -> AbstractBattle:
     """A minimal gen9 battle: active Furret (known stats) vs Torterra (unknown stats)."""
     battle = Battle(
         battle_tag="battle-gen9randombattle-1",
@@ -248,6 +248,7 @@ def make_battle(*, with_moves: bool = True) -> AbstractBattle:
 
     battle._team = {"p1: Furret": attacker}
     battle._opponent_team = {"p2: Torterra": defender}
+    battle._can_mega_evolve = bool(can_mega)
     return battle
 
 
@@ -257,6 +258,7 @@ def make_double_battle(
     fainted=(False, False),
     bench=("pikachu", "charizard"),
     can_tera=(False, False),
+    can_mega=(False, False),
     trapped=(False, False),
     moves=(("flamethrower", "quickattack"), ("waterfall", "icefang")),
     wait=False,
@@ -326,6 +328,7 @@ def make_double_battle(
     battle._available_switches = [list(bench_mons), list(bench_mons)]
     battle._force_switch = list(force_switch)
     battle._can_tera = list(can_tera)
+    battle._can_mega_evolve = list(can_mega)
     battle._trapped = list(trapped)
     return battle
 

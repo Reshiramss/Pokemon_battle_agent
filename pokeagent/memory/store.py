@@ -86,6 +86,18 @@ class MemoryLine:
         return f"{self.date}{turn} {self.level}/{self.key}{battle}: {self.text}"
 
 
+def memory_root(config, profile=None) -> Path:
+    """Memory root for this run, partitioned by format when needed.
+
+    Standard battles keep the legacy ``runs/_memory`` root (old memories stay
+    readable); Champions uses ``runs/_memory/champions`` so the two pools
+    never contaminate each other.
+    """
+    root = Path(getattr(config, "memory_path", None) or "runs/_memory")
+    key = getattr(profile, "memory_key", None) if profile is not None else None
+    return root / key if key else root
+
+
 class MemoryStore:
     """Read/write access to one memory root."""
 
