@@ -154,6 +154,12 @@ def describe_pokemon(p, *, revealed_moves: bool = False) -> str:
             parts.append("boosts{" + ",".join(f"{_name(k)}{v:+d}" for k, v in boosts.items()) + "}")
     except Exception:
         pass
+    # ``ability`` is None until revealed (our own team arrives with it from
+    # the request; opponents reveal it through the protocol), so a bare name
+    # here is always a fact, never a guess. The effect text is injected by
+    # the ability-effects hook.
+    if getattr(p, "ability", None):
+        parts.append(f"ability:{p.ability}")
     if p.item:
         parts.append(f"item:{p.item}")
     if revealed_moves and p.moves:
