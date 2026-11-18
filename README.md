@@ -1,19 +1,19 @@
-# PokeAgent — 开放式 LLM 宝可梦对战 Agent 框架
+# PokeAgent — 开放式 LLM 宝可梦对战 Agent
 
-让 LLM 像人一样打宝可梦对战：每回合经过「推理 → 并行工具调用 → 再推理 → 终端工具提交决策」的完整 agentic 循环，可以查伤害计算、翻知识库、看对战历史，然后才决定出招。对战跑在**本地** [pokemon-showdown](https://github.com/smogon/pokemon-showdown) 服务器上（不连外部网站、无真人对手），通过 [poke-env](https://github.com/harrit-labs/poke-env) 与服务器通信。
+让 LLM 像人一样打宝可梦对战：它会查伤害、翻招式与特性资料、看对战历史和以往比赛记忆，再决定这一回合怎么打。对战跑在**本地** [pokemon-showdown](https://github.com/smogon/pokemon-showdown) 服务器上（不连外部网站、无真人对手），通过 [poke-env](https://github.com/harrit-labs/poke-env) 与服务器通信。
 
-灵感来自 [HF Agents Course Bonus Unit 3](https://huggingface.co/learn/agents-course/bonus-unit3/building_your_pokemon_agent)，但走的是完整 agentic 架构而非教程的"单次 LLM 调用出一招"模式。
+灵感来自 [HF Agents Course Bonus Unit 3](https://huggingface.co/learn/agents-course/bonus-unit3/building_your_pokemon_agent)，但走的不是“单次 LLM 调用出一招”，而是每回合完整的推理与决策流程。
 
-## 特性
+## 它能做什么
 
-- **完整 agentic 决策循环**：每回合模型先思考，再并行调用领域工具（伤害计算、招式/种族值/特性/克制知识查询、对战历史与自身推理检索、跨场次记忆检索、对局机制百科、对方配队流派识别），最后必须通过 `submit_decision` 终端工具提交决策——框架对照当前合法动作校验，非法提交会带着错误信息重试。
-- **跨场次记忆（grep 式，无向量库）**：每场结束把「宝可梦 / 队伍 / 战术（灭歌、戏法空间、雨天…）/ 整场」四层观察写成带出处的 JSONL；下场比赛按对手阵容自动注入最近记忆（≤3 行），模型也可用 `memory_search` 按层 grep，单场内则用 `battle_history(pattern=...)` 检索自己的推理。
-- **双打 6 选 4 全流程（VGC 规则）**：队伍预览阶段用 `submit_team` 从 6 只中选 4 只携带（前 2 为首发）；对战内每回合 `submit_decision` 提交双槽动作，出招带符号目标（`opp1/opp2/ally/self`），与 `get_possible_showdown_targets` 校验一致。对手信息只显示 6 只种类，招式/道具/特性随对战逐步揭示。
-- **永不超时判负**：每个决策有硬时间预算，超时或出错自动回退随机出招——质量降级，但绝不因超时输掉对战。
-- **全程落盘，可复现**：每场对战自动留下完整记录——逐回合的决策与理由、模型的逐字思考过程（CoT）、以及模型看到的**完整对话轨迹**（`llm.jsonl`，prompt/响应/工具结果逐字复现）。
-- **双模式**：同一套 agent 支持常规 Gen 9 与 Pokémon Showdown `champions` mod；`FormatProfile` 自动切换数值模型（EV/IV vs Stat Points）、静态数据（mod 覆盖表）、Tera/Mega 与 PP 规则，通过 `battle_format` 或 `--format` 选择。
-- **可插拔后端**：任何 OpenAI 兼容端点（vLLM、Ollama、各类网关、官方 API）或 Anthropic；Provider / Tool / Hook / SubAgent / Compressor 全部是抽象接口，实现 + 注册即可扩展。
-- **速度与成本设计**：决策关键路径零子 agent；威胁分析、战后复盘、历史压缩全部跑在后台的便宜模型上，摘要注入后续决策，不阻塞对战。
+- **像人一样查资料再出招**：每回合可以调用伤害计算、招式/种族值/特性/属性克制查询、对战历史检索、跨场次记忆、对局机制百科、对方配队流派识别等工具；最终决策会对照当前合法动作校验，非法选择会被打回并要求重新提交。
+- **完整的 VGC 双打 6 选 4**：选队阶段从 6 只中选 4 只并指定首发；对战内每回合为两个槽位分别出招，支持 `opp1/opp2/ally/self` 目标、Tera/Mega 等机制。对手在选队时只暴露 6 只种类，招式/道具/特性随对战逐步揭示。
+- **决策前自动注入知识**：每回合自动带上属性克制、已确认特性的效果说明、当前可用招式与对方已揭示招式的效果摘要、双打核心机制、天气/场地提示、对方使用率数据等，不需要模型每次自己查。
+- **跨场次记忆**：每场结束后记住对手的宝可梦、队伍、常见战术（灭歌、戏法空间、雨天、顺风等）和整场结果；下一场遇到相同对手或阵容时，会自动带上最近的观察，模型也可以主动检索更深的历史。
+- **永不因超时判负**：每次决策有固定时间预算，超时或调用失败会自动回退为随机出招——质量会下降，但不会把胜利直接送给对手。
+- **全程可复现**：每场对战都会保存逐回合局面、决策、理由、模型的完整思考过程，以及模型看到的完整对话轨迹；事后可以离线复盘“当时为什么这么打”。
+- **两种规则模式**：常规 Gen 9 与 Pokémon Showdown 的 `champions` mod 共用同一套 agent，自动切换数值规则、可用机制（Tera/Mega）、PP 上限与数据表。
+- **任意 LLM 后端**：OpenAI 兼容端点（vLLM、Ollama、各类网关、官方 API）或 Anthropic 均可。
 
 ## 环境要求
 
@@ -29,24 +29,24 @@ cd Pokemon_battle_agent
 pip install -e ".[dev]"
 ```
 
-### 导出 Showdown 静态数据（move_info / type_matchup / species_info 的主数据源）
+### 可选：更新 Showdown 静态数据
+
+仓库已经带了从 pokemon-showdown 导出的招式/图鉴/属性/特性/道具等数据，日常使用无需操作。升级 pokemon-showdown 后如需同步数据：
 
 ```bash
 node scripts/export_showdown_data.js /path/to/pokemon-showdown/dist/data pokeagent/data/showdown
 ```
 
-从 pokemon-showdown 的编译产物导出 7 张表（招式/图鉴/属性表/别名/分级/文本）为 JSON。仓库里已带导出好的副本；升级 pokemon-showdown 后重跑一次即可。缺了它这三个工具自动回退到 poke-env 的 GenData，功能不中断。
+### 可选：Smogon 使用率快照
 
-### 可选：Smogon 使用率快照（离线大数据）
-
-在有外网的机器上一次性下载真实天梯（如 `gen9vgc2025regi`）的使用率快照，之后 agent 完全离线注入对方已揭示宠物的使用率与常见招式/道具/特性：
+在有外网的机器上一次性下载真实天梯（如 `gen9vgc2025regi`）的使用率数据，之后即可完全离线使用：
 
 ```bash
 python scripts/fetch_usage_snapshot.py            # 下载到 pokeagent/data/usage/
-# 按脚本输出的 smogon_stats_snapshot 行写进 config.toml 即可
+# 按脚本输出把 smogon_stats_snapshot 写进 config.toml
 ```
 
-对战机制百科（`pokeagent/data/mechanics.json`）与常见配队流派（`pokeagent/data/team_comps.json`）是仓库自带的策展知识：双打回合恒注入 3 行核心规则、按当前天气/场地追加情境提示，模型也可随时用 `mechanics_info` / `team_comp` 工具查询。
+设置后，agent 会为对方已揭示的宝可梦注入使用率、常见招式、道具和特性。没有快照时会静默跳过，不影响对战。
 
 ## 快速开始
 
@@ -57,17 +57,17 @@ git clone https://github.com/smogon/pokemon-showdown.git
 cd pokemon-showdown
 # 安装自定义对战格式（一次性；config/custom-formats.ts 是官方扩展点，不改上游代码）
 cp /path/to/Pokemon_battle_agent/server/custom-formats.ts config/custom-formats.ts
-node build                                    # 一次性编译（秒级），把格式编进 dist/config/
+node build                                    # 一次性编译（秒级）
 node pokemon-showdown start --no-security --skip-build 8964
 ```
 
-端口任意（默认配置用 8964），与下一步 `config.toml` 里的 `server_port` 保持一致即可。框架会给所有玩家（包括对手 bot）统一传入正确的服务器配置。
+端口可任意，默认配置使用 8964，与下一步 `config.toml` 中的 `server_port` 保持一致即可。
 
-自定义格式 `gen9vgc2025regihidden`（[Gen 9] VGC 2025 Reg I (Hidden)）= 官方 Reg I 规则：双打、50 级、带 6 选 4 + 选首发、限两只受限神。Open Team Sheets 在当前 Showdown 是双方主动同意制（双方都在预览时点同意才公开配置），agent 客户端会自动拒绝，因此双方配置保持隐藏、只随对战逐步揭示——这正是我们想要的 6 只种类信息模型。
+默认自定义格式 `gen9vgc2025regihidden`（[Gen 9] VGC 2025 Reg I (Hidden)）遵循官方 Reg I 规则：双打、50 级、6 选 4 + 选首发、限两只受限神。双方配置在选队时保持隐藏，只随对战逐步揭示。
 
 ### 2. 配置 LLM
 
-复制示例配置为 `config.toml` 并编辑（`config.toml` 在 .gitignore 中，私有端点和密钥不会被提交）：
+复制示例配置为 `config.toml` 并编辑（`config.toml` 已在 .gitignore 中，私有端点与密钥不会被提交）：
 
 ```toml
 [agent]
@@ -78,14 +78,14 @@ base_url = "https://api.example.com/v1"        # OpenAI 兼容端点；不设则
 server_port = 8964                             # 与你的 Showdown 服务器一致
 ```
 
-用 Anthropic 的话把 `provider` 改为 `"anthropic"`，并设置环境变量：
+使用 Anthropic 时把 `provider` 改为 `"anthropic"`，并设置环境变量：
 
 ```bash
 export ANTHROPIC_API_KEY=<你的key>
 export ANTHROPIC_BASE_URL=https://<网关地址>   # 可选，接内部网关时用
 ```
 
-### 3. 跑对战 + 看报告
+### 3. 跑对战并查看报告
 
 ```bash
 python scripts/run_battle.py --opponent heuristic --battles 1
@@ -98,11 +98,9 @@ python scripts/postmortem.py            # 汇总 runs/ 下的所有对战
 python scripts/postmortem.py --last 3   # 只看最近 3 场
 ```
 
-`--opponent agent` 是 AI vs AI：第二个 PokeAgent 用同样的模型配置、独立账号与另一套队伍，
-后台子 agent 自动关闭（共享服务器上资源减半）。双方各自的完整记录落在 `runs/`
-下两个目录（按用户名区分），postmortem 各自可读。
+`--opponent agent` 是 AI vs AI：对手是第二个 PokeAgent，使用同样的模型配置、独立账号和另一套队伍，后台分析关闭以减少资源占用。双方各自的对战记录会落在 `runs/` 下两个目录中。
 
-### 4. 人机对战（人类 vs AI）——已写好、尚未实测
+### 4. 人机对战（人类 vs AI）
 
 ```bash
 python scripts/human_battle.py --team "Shadow Bolt"
@@ -111,14 +109,9 @@ python scripts/human_battle.py --team "Shadow Bolt"
 #   --wait-for NAME    只接受来自该用户的挑战（默认接受任何人）
 ```
 
-脚本启动后 agent 以 `PokeAgent` 用户名挂机等待挑战。用浏览器打开本地服务器
-（`http://localhost:8964`），任选用户名登录，然后向 `PokeAgent` 发起
-**[Gen 9] VGC 2025 Reg I (Hidden)** 格式的挑战（挑战下拉框里能选到），即可开打。
-agent 侧的选 4/首发/出招流程与 AI vs AI 完全一致；出问题时看 `runs/logs/`
-下当场的 `events.jsonl` / `llm.jsonl`。
+脚本启动后 agent 以 `PokeAgent` 用户名等待挑战。用浏览器打开本地服务器（`http://localhost:8964`），任选用户名登录，然后向 `PokeAgent` 发起 **[Gen 9] VGC 2025 Reg I (Hidden)** 格式的挑战即可开打。
 
-> ⚠️ 此路径尚未经过实测，属实验性功能；首次试玩如遇挂起或非法指令，请带着
-> 记录目录反馈。
+> 此路径尚未经过真实浏览器的端到端实测，属实验性功能；如遇挂起或非法指令，请附上 `runs/` 下对应的记录目录反馈。
 
 运行结束后会打印胜负与记录目录：
 
@@ -128,7 +121,7 @@ Agent wins: 1
 Runs logged under: /…/Pokemon_battle_agent/runs
 ```
 
-postmortem 每场输出一行，例如：
+`postmortem.py` 每场输出一行，例如：
 
 ```
 20261029T020119Z_battle-gen9randombattle-4: WIN | turns 26 | fallbacks 0 (0%)
@@ -143,19 +136,19 @@ postmortem 每场输出一行，例如：
 | 文件 | 内容 |
 |---|---|
 | `meta.json` | 该场运行的配置快照（模型/端点/参数，api_key 脱敏） |
-| `events.jsonl` | 逐回合结构化记录：模型看到的局面、决策、理由、逐字 CoT、工具调用、token 与耗时，外加生命周期事件（预览、回退、对战结束） |
-| `llm.jsonl` | 完整 LLM 对话轨迹：system prompt、每回合组装的 prompt、每轮响应、每次工具结果——逐字可复现（`log_llm_conversation = false` 可关） |
+| `events.jsonl` | 逐回合结构化记录：模型看到的局面、决策、理由、逐字思考过程、工具调用、token 与耗时，以及预览/回退/对战结束等事件 |
+| `llm.jsonl` | 完整 LLM 对话轨迹：system prompt、每回合 prompt、每轮响应、每次工具结果——逐字可复现（`log_llm_conversation = false` 可关闭） |
 
-进程级日志在 `runs/logs/agent-<时间戳>.log`，框架全部 logging（provider 报错、hook 失败、子 agent 异常）都会落盘。
+进程级日志位于 `runs/logs/agent-<时间戳>.log`，包含模型调用错误、工具与知识注入失败、子任务异常等排查信息。
 
 ## Champion 模式
 
-框架同时支持 Pokémon Showdown 的 `champions` mod。Champion 规则下：
+同一套 agent 也支持 Pokémon Showdown 的 `champions` mod。Champion 规则下：
 
-- 数值用 **Stat Points**（每项 0–32、总和 ≤66），不受 level/IV 影响；
-- **无 Tera、有 Mega Evolution**（`submit_decision` 的 `mega=true`，每回合一次）；
-- PP 上限 20，moves/items/abilities/formats-data 使用 Champion 覆盖表；
-- 队伍必须 Champion 合法（`teams/champions-a.txt` / `champions-b.txt` 已带）。
+- 数值使用 **Stat Points**（每项 0–32、总和 ≤66），不使用 EV/IV 与等级公式；
+- **无 Tera、有 Mega Evolution**（每回合可对一只宝可梦使用）；
+- PP 上限为 20，数据表使用 Champion 覆盖表；
+- 队伍必须 Champion 合法（仓库自带 `teams/champions-a.txt` / `champions-b.txt`）。
 
 ```bash
 # 自定义隐藏 Champion VGC 格式（6 选 4、隐藏配置、AI 友好计时器）
@@ -167,7 +160,7 @@ python scripts/run_battle.py \
 python scripts/run_battle.py --format gen9championsvgc2026regmc --team "Champions A"
 ```
 
-自定义 Champion 格式在 `server/custom-formats.ts`，安装后需 `node build` 并重启 8964 服务器。完整说明（数据重导出、队伍 Stat Points、记忆分区、测试）见 `README.dev.md` 的“Champion 模式”一节。
+自定义 Champion 格式定义在 `server/custom-formats.ts`，安装后需 `node build` 并重启 8964 服务器。
 
 ## 配置
 
@@ -176,17 +169,19 @@ python scripts/run_battle.py --format gen9championsvgc2026regmc --team "Champion
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `provider` | `openai` | LLM 后端（`openai` / `anthropic`） |
-| `model` | 见 `config.py` | 主决策模型 |
+| `model` | `gpt-4o-mini` | 主决策模型 |
 | `base_url` / `api_key` | 空 | OpenAI 兼容端点与密钥；不设时依次读 `OPENAI_BASE_URL` / `OPENAI_API_KEY` |
 | `battle_format` | `gen9vgc2025regihidden` | 对战格式（自定义 6 选 4 VGC 双打；见上文格式安装） |
 | `server_host` / `server_port` | `localhost` / `8964` | 本地 Showdown 服务器地址 |
 | `turn_budget` / `preview_budget` | 45s / 30s | 每回合 / 选队决策的硬预算，超时回退 |
-| `two_phase` / `info_rounds` / `decision_rounds` | `True` / `4` / `3` | 每回合两阶段：信息收集（可用信息工具）→ 决策（仅 `submit_decision`）；`two_phase=false` 回到旧单循环 |
-| `smogon_stats_snapshot` | 空 | Smogon 使用率快照文件（`scripts/fetch_usage_snapshot.py` 一次性下载）；设置后离线加载，注入对方已揭示宠物的使用率/常见招式/道具/特性 |
-| `smogon_stats_format` / `smogon_stats_fetch` | 自动 / `false` | 使用率对应的真实天梯格式 id（默认自动去掉隐藏格式的 `hidden` 后缀）；`fetch=true` 允许无快照时联网回退 |
+| `max_tokens_per_call` | 4000 | 单次模型调用的 token 上限；推理模型需要留出思考 token |
+| `smogon_stats_snapshot` | 空 | 使用率快照文件（`scripts/fetch_usage_snapshot.py` 一次性下载）；设置后离线加载 |
+| `smogon_stats_format` / `smogon_stats_fetch` | 自动 / `false` | 使用率对应的真实天梯格式 id（默认去掉隐藏格式的 `hidden` 后缀）；`fetch=true` 允许无快照时联网回退 |
+| `enable_memory` | `true` | 是否启用跨场次记忆 |
+| `enable_subagents` | `true` | 是否启用后台的威胁分析、选队分析与战后复盘 |
 | `runs_dir` | `runs` | 对战记录输出目录 |
 
-完整配置项与默认值见 `pokeagent/config.py`。
+完整配置项及注释见 `config.example.toml`。
 
 ## 测试
 
@@ -196,38 +191,10 @@ python -m pytest tests/ -q --ignore=tests/test_e2e_loop.py \
     --ignore=tests/test_e2e_doubles.py --ignore=tests/test_e2e_champions.py   # 纯离线
 ```
 
-三个 e2e 测试是**零 token 真实对战**（单打 / 双打 / Champion 双打 AI vs AI）：用 stub provider 跑完整协议、
-落盘、复盘全链路；双打 e2e 验收 6 选 4 预览合法、双槽决策带目标、零回退回合、双方记录目录独立；
-Champion e2e 额外验收 Stat Points、PP≤20、无 Tera 与 state/meta 落盘。
+三个 e2e 测试是零 token 的真实对战（单打 / 双打 / Champion 双打 AI vs AI）：用 stub 模型跑完整协议、记录与复盘流程，不需要 API key。
 
-## 架构一览
+## 路线图
 
-```
-Showdown 服务器 ──▶ PokeAgent（poke-env Player 子类）
-                     ├─ 阶段1 队伍预览: AgentLoop.run_preview
-                     │     hook 注入知识 → submit_team 终端工具选 4 只（前 2 首发）
-                     │     失败/超时 → 回退基类默认顺序
-                     └─ 阶段2 对战决策: AgentLoop.run_turn（每回合，两段式）
-                          ① 决策前 hook 并行注入知识（克制矩阵、机制提示、使用率、对方数据树）
-                          ② 组装上下文 prompt（情报/知识/历史/反思/当前局面/合法动作）
-                          ③ 信息阶段：并行调用伤害计算、知识查询、历史检索（上限 4 轮）
-                          ④ 决策阶段：submit_decision 提交双槽动作+目标（校验合法性，上限 3 次重试）
-                          失败/超时 → 随机出招兜底，永不判负
-                     后台（不阻塞决策，跑便宜模型）：
-                       新宝可梦威胁分析 · 战后复盘 · 历史压缩
-                       → 摘要注入后续回合的 prompt
-```
-
-扩展方式都是"实现接口 + 注册"两步：
-
-- **新 LLM 后端**：实现 `LLMProvider.complete()`（`providers/base.py`），在 `get_provider` 工厂注册。
-- **新工具**：继承 `Tool`（`tools/base.py`），`registry.register(...)` 挂载。
-- **新 hook**：继承 `PreDecisionHook` / `PostDecisionHook`（`hooks/base.py`），返回一段知识片段即可。
-- **新子 agent**：继承 `SubAgent`（`tasks/base.py`），`TaskRunner.register()` 后任意位置 fire-and-forget。
-- **新压缩策略**：实现 `ContextCompressor` 协议（`context/compressor.py`）。
-
-## 路线图（TODO）
-
-- **蒸馏他人知识**：从高分对战记录/解说中提炼决策知识并入库（`mechanics.json` / `team_comps.json` 的扩展或新增知识模块）。
-- **人机对战实测**：`scripts/human_battle.py` 已写好（见上文第 4 步），等待真实浏览器挑战的端到端验证。
-- **知识加载缺口（技能效果 / 特性 / 道具）**：`[NOW]` 只给招式元数据，效果文本依赖模型主动 `move_info`（实测 125 个决策点只查 1 次）。待办：P0 在 prompt 中显示我方特性；P1 注入可用/已揭示招式的 `shortDesc`；P2 补 `item_info`/道具效果与 `submit_decision` 软校验警告。详见 `README.dev.md` 的 TODO。
+- **人机对战实测**：`scripts/human_battle.py` 已写好，等待真实浏览器的端到端验证。
+- **知识库扩展**：继续补充道具效果查询与决策前的机制提示，并增加“特性/道具克制关系”的软校验提醒。
+- **对手知识蒸馏**：从高分对战记录与解说中提炼决策知识，扩充机制百科与配队流派库。
