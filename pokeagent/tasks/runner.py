@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from .base import SubAgent, SubAgentContext
 
@@ -49,11 +49,16 @@ class TaskRunner:
         sctx: SubAgentContext,
         cm: "ContextManager | None" = None,
         intel_key: str | None = None,
+        on_result: Callable[[str], None] | None = None,
+        store_intel: bool = True,
     ) -> asyncio.Task | None:
         """Schedule one sub-agent run. Returns the task (fire-and-forget).
 
-        The summary lands in ``sctx.intel[intel_key]`` (default: agent name);
-        a ContextManager, if given, receives lifecycle events for the log.
+        The summary lands in ``sctx.intel[intel_key]`` (default: agent name)
+        unless ``store_intel`` is False; ``on_result`` receives it instead —
+        that is how the strategy-COT maintainer writes back into battle
+        state without duplicating itself into ``[INTEL]``. A ContextManager,
+        if given, receives lifecycle events for the log.
         """
         agent = self._agents.get(agent_name)
         if agent is None:
@@ -70,7 +75,17 @@ class TaskRunner:
                         agent.run(sctx), timeout=self.config.subagent_timeout
                     )
                 summary = (summary or "").strip()
-                if sctx.intel is not None and summary:
+                if on_result is not None and summary:
+                    try:
+                        on_result(summary)
+                    except Exception as e:  # a broken callback must not kill the task
+                        logger.warning(
+                            "sub-agent '%s' result callback failed: %s: %s",
+                            agent_name,
+                            type(e).__name__,
+                            e,
+                        )
+                if store_intel and sctx.intel is not None and summary:
                     sctx.intel.put(key, summary)
                 if cm is not None:
                     cm.log_event(

@@ -63,7 +63,7 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    overrides = {}
+    overrides = {"opponent_class": "human"}
     if args.team:
         overrides["team"] = args.team
     if args.format:

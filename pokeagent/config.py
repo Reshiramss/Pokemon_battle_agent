@@ -35,7 +35,7 @@ class AgentConfig:
     # Doubles 6-pick-4 VGC without Open Team Sheets: team preview only reveals
     # the opponent's 6 species. Requires the custom format from
     # server/custom-formats.ts to be installed on the Showdown server.
-    battle_format: str = "gen9vgc2025regihidden"
+    battle_format: str = "gen9championsvgc2026regmchidden"
     server: str = "localhost"  # "localhost" | "showdown"
     server_host: str = "localhost"
     server_port: int = 8964  # custom port; avoids colliding with poke-env's default 8000
@@ -70,7 +70,9 @@ class AgentConfig:
     # deterministic extractor runs instead (no extra model calls).
     enable_reasoning_notes: bool = True
     reasoning_note_input_chars: int = 6000  # CoT chars passed to the note model
-    reasoning_note_max_tokens: int = 350
+    # reasoning models spend max_tokens on hidden thinking first; too small a
+    # budget returns an empty answer (that is why notes were never produced)
+    reasoning_note_max_tokens: int = 1500
 
     # --- rolling strategy brief (L2) ---
     # Every ``reasoning_brief_every`` new notes, a background model call
@@ -79,7 +81,18 @@ class AgentConfig:
     enable_strategy_brief: bool = True
     reasoning_brief_every: int = 2
     reasoning_brief_input_chars: int = 4000
-    reasoning_brief_max_tokens: int = 400
+    reasoning_brief_max_tokens: int = 1200
+
+    # --- battle-level COT (how this game is won) ---
+    # After every turn a background sub-agent — on the MAIN model — rewrites
+    # the COT from the previous text, this turn's hidden thinking, the board
+    # the model saw, and what happened. It is rendered as [STRATEGY], so each
+    # decision starts from the agent's own standing plan. Failures keep the
+    # previous text; the turn never waits on it.
+    enable_strategy_cot: bool = True
+    strategy_cot_max_tokens: int = 3000  # thinking is spent from this budget
+    strategy_cot_input_chars: int = 8000
+    thinking_record_chars: int = 5000  # thinking text kept on TurnRecord
 
     # --- sub-agents ---
     # False -> the agent runs without the background TaskRunner entirely
@@ -102,16 +115,34 @@ class AgentConfig:
     # default so battles never stall on a machine without internet
     smogon_stats_fetch: bool = False
 
-    # --- cross-battle memory (S4) ---
-    # Finished battles are written to layered JSONL under runs/_memory/
-    # (species / teams / tactics / battles). Retrieval is grep-style only —
-    # no embeddings — via the memory hook and the memory tools.
+    # --- cross-battle memory (S5) ---
+    # Facts are immutable atoms; scenes are consolidated views; retrieval is
+    # grep over a deterministic line projection. No embeddings, no server.
     enable_memory: bool = True
     memory_dir: Path | None = None  # defaults to <runs_dir>/_memory
-    memory_lines_cap: int = 500  # rows kept per file
-    memory_hook_chars: int = 250  # prompt budget for the memory fragment
-    memory_hook_max_lines: int = 3
-    memory_search_limit: int = 8
+    # Rule/season partitioning (see memory/scope.py).
+    default_regulation: str = "auto"  # auto = parse regmc/regmb/regi from the id
+    # Deterministic quality gate recorded on every battle meta atom.
+    quality_min_lesson: float = 0.6
+    quality_min_behavior: float = 0.5
+    fallback_hard_gate: float = 0.25
+    allow_previous_seasons: bool = True
+    previous_season_decay: float = 0.6  # ranking multiplier for old seasons
+    # Cold start: seed archetypes + our teams on first use; species skeletons
+    # are generated lazily for exactly the keys a battle asks about.
+    seed_on_first_run: bool = True
+    seed_champions_sets: bool = True
+    prior_rank_weight: float = 0.6  # priors rank below observations
+    # Prompt budgets.
+    memory_index_chars_preview: int = 1200
+    memory_recall_chars_turn: int = 400
+    memory_read_chars: int = 2000
+    memory_tool_calls_per_turn: int = 3
+    memory_recall_timeout_ms: int = 2000  # reserved; local reads are sync
+    # Cross-rule transfer is deliberately off by default (docs §6.5).
+    cross_ruleset_read: bool = False
+    # Origin of the opponent, used by the quality gate.
+    opponent_class: str = "unknown"  # human | agent | heuristic | random | unknown
 
     # --- misc ---
     poke_env_log_level: str = "WARNING"
@@ -120,6 +151,11 @@ class AgentConfig:
     # debugged offline without re-running anything.
     log_level: str = "INFO"  # file log level (console stays WARNING)
     log_llm_conversation: bool = True  # full prompt/response/tool-result dump per turn
+    # reasoning-model "thinking" text (Anthropic thinking blocks / OpenAI
+    # reasoning_content). It is not assistant text, so it never reaches the
+    # prompt, but it is the only reasoning a reasoning model shows us —
+    # without it llm.jsonl records the visible answer and nothing else.
+    log_thinking: bool = True
 
     # --- paths ---
     runs_dir: Path = field(default_factory=lambda: Path("runs"))

@@ -20,6 +20,7 @@ from ..providers.base import UserMessage
 from ..state.model import (
     BattleState,
     Claim,
+    GlobalCOT,
     ReasoningLedger,
     ReasoningNote,
     StrategyBrief,
@@ -28,6 +29,7 @@ from ..state.prune import prune_state
 from ..state.render import render_observed
 from ..tasks.base import IntelStore
 from .brief import deterministic_brief
+from .cot import seed_cot_text, thinking_tail
 from .compressor import TruncatingCompressor, _compact_record
 from .records import TurnRecord, available_actions, snapshot
 
@@ -62,8 +64,10 @@ available and it is the better play. Champions formats have no Tera; Mega works 
 only when the notes say so.
 - Optional `reasoning_update`: when your plan changes (a threat is answered, the \
 old line failed), send `win_conditions` (<=2), `commitments` (<=3) and/or `correction` \
-to rewrite your committed plan. `[STRATEGY]` is your rolling brief — it is a summary, \
-not a fact: if fresh observations contradict it, trust the observations and update the plan.
+to rewrite your committed plan. `[STRATEGY]` is your battle plan — how this game \
+is won, rewritten after each turn from your own reasoning and the board you saw. \
+Treat it as guidance, not fact: if fresh observations contradict it, trust the \
+observations and update the plan.
 - You have a hard per-turn time budget (~45s). Be decisive: 1-2 rounds of \
 information are usually enough — then commit.
 
@@ -173,12 +177,38 @@ class ContextManager:
         # per-battle knowledge tree (knowledge/tree.BattleKB), built by the
         # player at team preview and refreshed every decision point
         self.battle_kb = None
+        # cross-battle memory: the stable index lives in the system prompt;
+        # the per-turn recall is rebuilt from newly revealed facts.
+        self.memory_index: str = ""
+        self.system_prompt: str = SYSTEM_PROMPT
+        self._memory_index_built = False
+        self._memory_reveal_state: dict = {}
+        self._memory_recalled_ids: set[str] = set()
+        self._memory_tool_calls = 0
         # compression state: an LLM summary covering records with seq <= covered
         self.summary: str | None = None
         self.summary_covered_seq = 0
         self.compressor = None  # LLM-backed compressor, attached by the player
         self._compressing = False
         self._compressor_fallback = TruncatingCompressor()
+
+    # --- cross-battle memory prompt state ---------------------------------
+
+    def begin_turn(self) -> None:
+        """Reset the per-decision memory tool budget."""
+        self._memory_tool_calls = 0
+
+    def attach_memory_index(self, text: str | None) -> None:
+        """Compose the stable system prompt once the index is available."""
+        self.memory_index = text or ""
+        parts = [SYSTEM_PROMPT]
+        if getattr(self.config, "enable_memory", False):
+            from ..memory.recall import MEMORY_TOOLS_GUIDE
+
+            parts.append(MEMORY_TOOLS_GUIDE)
+        if self.memory_index:
+            parts.append(self.memory_index)
+        self.system_prompt = "\n\n".join(parts)
 
     # --- persistence ------------------------------------------------------
 
@@ -230,6 +260,17 @@ class ContextManager:
         except Exception:  # pragma: no cover - disk issues must not kill a turn
             pass
 
+    def record_before(self, seq: int) -> TurnRecord | None:
+        """The decision point immediately before ``seq`` (records append in order).
+
+        The maintainer needs it because ``record.events`` are the outcome of
+        *that* decision, not of the record that carries them.
+        """
+        for record in reversed(self.records):
+            if record.seq < seq:
+                return record
+        return None
+
     def record_turn(self, record: TurnRecord) -> None:
         self._seq += 1
         record.seq = self._seq
@@ -260,7 +301,7 @@ class ContextManager:
         if note is not None:
             self._store_note(note, record.seq)
             return
-        if self._extracting or record.cot is None:
+        if self._extracting or not (record.cot or record.thinking):
             return
         self._extracting = True
         try:
@@ -444,8 +485,78 @@ class ContextManager:
         )
         self._store_brief(brief, end_seq)
 
-    def _strategy_text(self) -> str | None:
-        """``[STRATEGY]``: the rolling brief, capped to keep prompts tight."""
+    def store_global_cot(
+        self, text: str, *, turn: int, seq: int, source: str = "llm"
+    ) -> None:
+        """Write the background rewrite of the battle COT.
+
+        Called from the sub-agent result callback, possibly after a newer
+        turn already stored its own text — ``seq`` fencing is what keeps a
+        slow older call from regressing the plan.
+        """
+        if self.state is None:
+            self.log_event("strategy_cot_skipped", turn=turn, seq=seq, reason="no_state")
+            return
+        text = (text or "").strip()
+        if not text:
+            self.log_event("strategy_cot_empty", turn=turn, seq=seq)
+            return
+        current = self.ledger.global_cot
+        if current is not None and seq < current.seq:
+            self.log_event(
+                "strategy_cot_stale", turn=turn, seq=seq, current_seq=current.seq
+            )
+            return
+        cot = GlobalCOT(text=text, turn=turn, seq=seq, source=source)
+        # the player shares one ledger object between the manager and the
+        # state; this also covers callers that built a state separately
+        self.ledger.global_cot = cot
+        self.state.ledger.global_cot = cot
+        self.log_event(
+            "strategy_cot",
+            turn=turn,
+            seq=seq,
+            source=source,
+            chars=len(text),
+            text=text[:600],
+        )
+        self.save_state()
+
+    def seed_global_cot(self, reason: str | None = None, *, turn: int = 0) -> None:
+        """Deterministic opening COT so the first decision already sees one."""
+        if self.state is None:
+            return
+        current = self.ledger.global_cot
+        if current is not None and not current.empty():
+            return
+        text = seed_cot_text(reason, plan=self.state.plan)
+        if not text:
+            return
+        cot = GlobalCOT(text=text, turn=turn, seq=0, source="seed")
+        self.ledger.global_cot = cot
+        self.state.ledger.global_cot = cot
+        self.log_event("strategy_cot_seed", turn=turn, text=text[:600])
+        self.save_state()
+
+    def _strategy_text(self, turn: int | None = None) -> str | None:
+        """``[STRATEGY]``: the battle COT, else the rolling brief.
+
+        The COT is the line the agent itself rewrote after the last turn.
+        Its header names the turn it was written from — the rewrite runs in
+        the background and can lag behind the board, so claiming "rewritten
+        after each turn" would overstate how fresh the plan is.
+
+        The brief stays as the no-model/early-battle fallback.
+        """
+        cot = self.ledger.global_cot
+        if cot is not None and not cot.empty():
+            header = "[STRATEGY — how this game is won"
+            if cot.turn:
+                header += f", as of turn {cot.turn}"
+            if turn is not None and cot.turn and turn >= cot.turn + 2:
+                header += ", may be stale"
+            text = header + "]\n" + cot.text
+            return text if len(text) <= 600 else text[:599].rstrip() + "…"
         brief = self.ledger.brief
         if brief is None or brief.empty():
             return None
@@ -673,12 +784,16 @@ class ContextManager:
                 or (note.intent and note.intent != (r.reason or ""))
             ):
                 lines.extend(_note_lines(note))
-            elif r.cot:
-                excerpt = r.cot[:600]
-                lines.append(
-                    "Your reasoning then (excerpt): " + excerpt
-                    + ("…" if len(r.cot) > 600 else "")
-                )
+            elif r.cot or r.thinking:
+                # visible text first; hidden thinking is the only reasoning a
+                # reasoning model shows. The record keeps head + tail of it,
+                # so take the conclusion, not the opening arithmetic.
+                if r.cot:
+                    label, excerpt = "Your reasoning then", r.cot[:600]
+                else:
+                    label = "Your thinking then"
+                    excerpt = thinking_tail(r.thinking) or r.thinking[-600:]
+                lines.append(f"{label} (excerpt): " + excerpt)
         if r.events:
             lines.append("What happened: " + "; ".join(r.events[:6]))
         lines.append("Learn from that outcome, then decide this turn.")
@@ -764,11 +879,21 @@ class ContextManager:
                 "[KNOWLEDGE — precomputed for this turn]\n" + "\n\n".join(hook_fragments)
             )
 
+        if getattr(self.config, "enable_memory", False):
+            try:
+                from ..memory.recall import recall_turn
+
+                recalled = recall_turn(battle, self, self.config)
+            except Exception:
+                recalled = None
+            if recalled:
+                sections.append(recalled)
+
         history = self._history_text()
         if history:
             sections.append(f"[HISTORY]\n{history}")
 
-        strategy = self._strategy_text()
+        strategy = self._strategy_text(battle.turn)
         if strategy:
             sections.append(strategy)
 
@@ -781,6 +906,7 @@ class ContextManager:
         user = "\n\n".join(sections)
         # soft-cap: shed verbatim history by dropping compact old records first
         cap_chars = self.config.context_token_soft_cap * 4
-        return SYSTEM_PROMPT, [UserMessage(user)] if len(user) <= cap_chars else [
+        system = self.system_prompt or SYSTEM_PROMPT
+        return system, [UserMessage(user)] if len(user) <= cap_chars else [
             UserMessage(user[:cap_chars] + "\n…[context truncated to fit budget]")
         ]

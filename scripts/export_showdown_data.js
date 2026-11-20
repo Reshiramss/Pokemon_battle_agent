@@ -4,6 +4,7 @@
  * Usage:
  *   node export_showdown_data.js <showdown-dist-data-dir> <out-dir>
  *        [--overlay champions|championsregmb ...] [--formats]
+ *        [--random-sets champions]
  *
  * Base tables are written to <out-dir>/showdown/. Each --overlay writes the
  * compiled mod's override tables (inherit: true entries) to
@@ -24,6 +25,7 @@ const path = require('path');
 
 const positional = [];
 const overlays = [];
+const randomSetMods = [];
 let exportFormats = false;
 const cliArgs = process.argv.slice(2);
 for (let i = 0; i < cliArgs.length; i++) {
@@ -34,6 +36,10 @@ for (let i = 0; i < cliArgs.length; i++) {
 		if (cliArgs[i + 1]) overlays.push(cliArgs[++i]);
 	} else if (arg.startsWith('--overlay=')) {
 		overlays.push(arg.slice('--overlay='.length));
+	} else if (arg === '--random-sets') {
+		if (cliArgs[i + 1]) randomSetMods.push(cliArgs[++i]);
+	} else if (arg.startsWith('--random-sets=')) {
+		randomSetMods.push(arg.slice('--random-sets='.length));
 	} else if (arg.startsWith('-')) {
 		// ignore unknown flags
 	} else {
@@ -43,7 +49,7 @@ for (let i = 0; i < cliArgs.length; i++) {
 
 const [distDir, outDir] = positional;
 if (!distDir || !outDir) {
-	console.error('usage: node export_showdown_data.js <showdown-dist-data-dir> <out-dir> [--overlay <mod>] [--formats]');
+	console.error('usage: node export_showdown_data.js <showdown-dist-data-dir> <out-dir> [--overlay <mod>] [--formats] [--random-sets <mod>]');
 	process.exit(1);
 }
 
@@ -131,6 +137,26 @@ for (const rawMod of overlays) {
 	const bundleOut = path.join(outDir, `showdown_${modId}`);
 	for (const [outName, table] of Object.entries(merged)) {
 		writeJson(path.join(bundleOut, `${outName}.json`), table);
+	}
+}
+
+// --- curated random-battle sets (cold-start priors) --------------------------
+// Source: <repo>/data/random-battles/<mod>/{sets,doubles-sets}.json. These are
+// plain JSON (not compiled modules), so read them from the source checkout.
+for (const modId of randomSetMods) {
+	const mod = String(modId || '').trim();
+	if (!mod) continue;
+	const srcDir = path.join(distDir, '..', '..', 'data', 'random-battles', mod);
+	const outDirForMod = path.join(outDir, 'seed', mod);
+	for (const file of ['sets.json', 'doubles-sets.json']) {
+		const src = path.join(srcDir, file);
+		if (!fs.existsSync(src)) continue;
+		try {
+			const table = JSON.parse(fs.readFileSync(src, 'utf8'));
+			writeJson(path.join(outDirForMod, file), table);
+		} catch (err) {
+			console.warn(`[random-sets] ${src}: ${err.message}`);
+		}
 	}
 }
 

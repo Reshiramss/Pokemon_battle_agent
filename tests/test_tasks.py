@@ -164,6 +164,48 @@ def test_runner_cancel_battle(tmp_path):
     asyncio.run(scenario())
 
 
+def test_runner_on_result_writes_back_without_polluting_intel(tmp_path):
+    async def scenario():
+        cm = make_cm(tmp_path)
+        runner = TaskRunner(AgentConfig(runs_dir=tmp_path / "runs"))
+        runner.register(_OkAgent())
+        got: list[str] = []
+        sctx = SubAgentContext(
+            battle=make_battle(), intel=cm.intel, inputs={"species": "torterra"}
+        )
+        runner.submit(
+            "battle-1", "ok_agent", sctx, cm=cm, intel_key="strategy_cot",
+            store_intel=False, on_result=got.append,
+        )
+        assert await _until(lambda: got)
+        assert got == ["analysis of torterra"]
+        assert len(cm.intel) == 0  # the callback owns the result, not [INTEL]
+
+    asyncio.run(scenario())
+
+
+def test_runner_swallows_a_broken_result_callback(tmp_path):
+    async def scenario():
+        cm = make_cm(tmp_path)
+        runner = TaskRunner(AgentConfig(runs_dir=tmp_path / "runs"))
+        runner.register(_OkAgent())
+
+        def boom(_text):
+            raise RuntimeError("callback exploded")
+
+        runner.submit(
+            "battle-1", "ok_agent",
+            SubAgentContext(battle=make_battle(), intel=cm.intel), cm=cm,
+            store_intel=False, on_result=boom,
+        )
+        ok = await _until(
+            lambda: "subagent_done" in (cm.run_dir / "events.jsonl").read_text()
+        )
+        assert ok  # the task completed despite the callback raising
+
+    asyncio.run(scenario())
+
+
 def test_runner_unknown_agent_is_noop(tmp_path):
     async def scenario():
         runner = TaskRunner(AgentConfig(runs_dir=tmp_path / "runs"))

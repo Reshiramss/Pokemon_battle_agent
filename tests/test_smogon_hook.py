@@ -68,8 +68,8 @@ def test_snapshot_loads_and_renders(tmp_path):
 
 
 def test_stats_format_never_uses_hidden_id():
-    # default battle format is the hidden one: "hidden" is stripped
-    config = AgentConfig()
+    # the hidden standard format: "hidden" is stripped
+    config = AgentConfig(battle_format="gen9vgc2025regihidden")
     assert SmogonUsageHook(config).stats_format == "gen9vgc2025regi"
     # explicit override wins
     config = AgentConfig(smogon_stats_format="gen9vgc2025regi")

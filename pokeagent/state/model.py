@@ -35,7 +35,7 @@ from ..knowledge.tree import BattleKB
 if TYPE_CHECKING:
     from poke_env.battle import AbstractBattle
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def _name(value: Any) -> str:
@@ -194,6 +194,29 @@ class StrategyBrief:
 
 
 @dataclass
+class GlobalCOT:
+    """The battle-level chain of thought: how this game is won.
+
+    Unlike ``StrategyBrief`` (fixed bullet schema, rewritten from notes),
+    this is a short narrative rewritten every turn by a background sub-agent
+    from the previous text, the turn's hidden thinking, the board the model
+    saw, and what actually happened. It is injected as ``[STRATEGY]`` so the
+    model re-reads its own plan at every decision.
+
+    ``seq`` is the record sequence the text was derived from; a late
+    background result never regresses a newer text.
+    """
+
+    text: str = ""
+    turn: int = 0
+    seq: int = 0
+    source: str = "llm"  # llm | thinking | seed | legacy
+
+    def empty(self) -> bool:
+        return not self.text.strip()
+
+
+@dataclass
 class ReasoningLedger:
     """Per-battle reasoning memory: notes, lifted directives, rolling brief."""
 
@@ -202,6 +225,7 @@ class ReasoningLedger:
     directives: list[Directive] = field(default_factory=list)
     brief: StrategyBrief | None = None  # rolling strategy brief (S3.5)
     brief_covered_seq: int = 0
+    global_cot: GlobalCOT | None = None  # battle-level plan text (rewritten per turn)
 
     def add_note(self, note: ReasoningNote) -> None:
         self.notes.append(note)
@@ -380,6 +404,11 @@ class BattleState:
                     else None
                 ),
                 "brief_covered_seq": self.ledger.brief_covered_seq,
+                "global_cot": (
+                    asdict(self.ledger.global_cot)
+                    if self.ledger.global_cot is not None
+                    else None
+                ),
             },
         }
 
@@ -394,6 +423,7 @@ class BattleState:
             ],
             brief=_brief_from_json(ledger_data.get("brief")),
             brief_covered_seq=int(ledger_data.get("brief_covered_seq") or 0),
+            global_cot=_cot_from_json(ledger_data.get("global_cot")),
         )
         return cls(
             meta=BattleMeta(**(data.get("meta") or {})),
@@ -405,6 +435,25 @@ class BattleState:
             plan=PlanBoard(**(data.get("plan") or {})),
             ledger=ledger,
         )
+
+
+def _cot_from_json(raw: Any) -> GlobalCOT | None:
+    """Load the battle COT; tolerate a plain-string legacy/parallel form."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return GlobalCOT(text=raw, source="legacy") if raw.strip() else None
+    if isinstance(raw, dict):
+        fields = GlobalCOT.__dataclass_fields__
+        known = {k: v for k, v in raw.items() if k in fields}
+        try:
+            known["turn"] = int(known.get("turn") or 0)
+            known["seq"] = int(known.get("seq") or 0)
+        except (TypeError, ValueError):
+            return None
+        cot = GlobalCOT(**known)
+        return None if cot.empty() else cot
+    return None
 
 
 def _brief_from_json(raw: Any) -> StrategyBrief | None:

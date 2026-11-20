@@ -50,7 +50,8 @@ def test_full_doubles_battle_two_agents(tmp_path):
         config = AgentConfig(
             runs_dir=tmp_path / "runs",
             server_port=8964,
-            team="Shadow Bolt",  # default battle format = hidden VGC doubles
+            battle_format="gen9vgc2025regihidden",
+            team="Shadow Bolt",  # standard hidden VGC doubles
             enable_subagents=False,  # keep the e2e light and synchronous
         )
         agent = PokeAgent(
@@ -77,8 +78,11 @@ def test_full_doubles_battle_two_agents(tmp_path):
     )
     assert len(run_dirs) == 2
     memory_root = tmp_path / "runs" / "_memory"
-    assert memory_root.is_dir()
-    assert any((memory_root / level).glob("*.jsonl") for level in ("species", "battles"))
+    scope_root = memory_root / "doubles" / "gen9" / "regi"
+    assert scope_root.is_dir()
+    assert any((scope_root / "atoms").glob("*.ndjson"))
+    assert any((scope_root / "facts" / "species").glob("*.ndjson"))
+    assert any((scope_root / "scenes" / "species").glob("*.json"))
     events = {
         d.name: [
             json.loads(line)
