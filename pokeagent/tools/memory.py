@@ -1,89 +1,152 @@
-"""Cross-battle memory tools: grep-style search and corpus stats.
+"""Memory tools: grep the fact projection, read a scene, inspect the scope.
 
-The corpus is the layered JSONL store written at battle end
-(``species`` / ``teams`` / ``tactics`` / ``battles``). Search is
-deliberately codebase-like: case-insensitive terms ANDed, ``regex=true``
-for a regular expression, newest rows first, every hit carrying the battle
-it came from.
+These are the drill-down surface behind ``[MEMORY INDEX]``. They never call a
+model and never mutate memory; each call counts against a small per-turn
+budget so a model cannot spend the whole context on history.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Iterable
 
-from ..memory.store import LEVELS, MemoryStore, memory_root
+from ..knowledge.static import normalize_name
+from ..memory import facts as memory_facts
+from ..memory.grep import Query
+from ..memory.keys import sanitize_key
+from ..memory.schema import normalize_subject
+from ..memory.scenes import load_scene, scene_for_key
+from ..memory.scope import previous_season_roots, scope_from, scope_root
 from .base import Tool, ToolContext, ToolError
 
 if TYPE_CHECKING:
-    from ..config import AgentConfig
+    from ..formats import FormatProfile
+    from ..memory.schema import FactLine
 
-MAX_RESULT_CHARS = 3000
-
-
-def _clip(text: str) -> str:
-    if len(text) <= MAX_RESULT_CHARS:
-        return text
-    return text[:MAX_RESULT_CHARS] + " …[truncated]"
+MAX_RESULT_CHARS = 4000
+_SEPARATOR = " | "
 
 
-def _store(config: "AgentConfig | None", profile=None) -> MemoryStore:
+def _clip(text: str, limit: int = MAX_RESULT_CHARS) -> str:
+    return text if len(text) <= limit else text[: limit - 8].rstrip() + " …[truncated]"
+
+
+def _profile(ctx: ToolContext) -> "FormatProfile":
+    profile = getattr(ctx.kb, "profile", None)
+    if profile is not None:
+        return profile
+    from ..formats import profile_for
+
+    return profile_for(ctx.config.battle_format)  # type: ignore[union-attr]
+
+
+def _context(ctx: ToolContext) -> tuple[Any, Path, Any]:
+    config = ctx.config
     if config is None:
         raise ToolError("memory is unavailable: no agent config")
     if not getattr(config, "enable_memory", False):
         raise ToolError("cross-battle memory is disabled in this agent config")
-    return MemoryStore(
-        memory_root(config, profile),
-        lines_cap=getattr(config, "memory_lines_cap", 500),
+    profile = _profile(ctx)
+    scope = scope_from(profile, config.battle_format, config.default_regulation)
+    root = scope_root(config, scope)
+    return scope, root, config
+
+
+def _check_budget(ctx: ToolContext) -> None:
+    cm = ctx.context
+    if cm is None or not hasattr(cm, "_memory_tool_calls"):
+        return
+    limit = int(getattr(ctx.config, "memory_tool_calls_per_turn", 3))
+    if cm._memory_tool_calls >= limit:
+        raise ToolError(
+            f"memory tool budget exceeded ({limit} calls this turn); decide with what you have"
+        )
+    cm._memory_tool_calls += 1
+
+
+def _roots(config: Any, scope: Any, root: Path) -> list[Path]:
+    roots = [root]
+    if getattr(config, "allow_previous_seasons", True):
+        roots.extend(previous_season_roots(config, scope, limit=2))
+    return [path for path in roots if path.is_dir()]
+
+
+def _normalize_subject(value: str | None) -> str:
+    return normalize_subject(value)
+
+
+def _matches(row: "FactLine", *, subject: str, kind: str, archetype: str, min_priority: int, since: str, query: Query) -> bool:
+    if subject and row.subject != subject:
+        return False
+    if kind and row.kind != kind:
+        return False
+    if archetype and archetype not in row.archetypes:
+        return False
+    if min_priority and row.priority < min_priority:
+        return False
+    if since and row.date and row.date < since:
+        return False
+    text = " ".join((row.subject, row.kind, " ".join(row.archetypes), " ".join(row.roles), row.content))
+    return query.matches(text)
+
+
+def _iter_rows(roots: Iterable[Path], layer: str) -> Iterable[tuple["FactLine", Path]]:
+    for root in roots:
+        if layer in ("facts", "all"):
+            for path in memory_facts.iter_fact_files(root):
+                for row in memory_facts.read_fact_file(path):
+                    row.origin = root.name
+                    yield row, root
+        if layer in ("atoms", "all"):
+            for path in memory_facts.iter_atom_files(root):
+                _meta, rows = memory_facts.read_atoms_file(path)
+                for row in rows:
+                    row.origin = root.name
+                    yield row, root
+
+
+def _render_row(row: "FactLine") -> str:
+    marker = ""
+    if row.maturity == "prior":
+        marker = f"[PRIOR:{row.source}] "
+    if row.conflict:
+        marker += "[CONFLICT] "
+    return (
+        f"{row.id} {row.subject}/{row.kind} m={row.maturity} n={row.evidence} "
+        f"p={row.priority} d={row.date or '-'} {marker}{row.content}"
     )
 
 
-class MemorySearchTool(Tool):
-    name = "memory_search"
+class MemoryGrepTool(Tool):
+    name = "memory_grep"
     description = (
-        "Search cross-battle memory — lessons from previous battles against "
-        "these opponents, with these Pokemon, or with these tactics. Memory is "
-        "layered: species (per-Pokemon observations), teams (matchup history of "
-        "a roster), tactics (e.g. Perish Song trap, Trick Room, rain), battles "
-        "(whole-battle summaries and post-battle reviews). Syntax mirrors "
-        "grepping a codebase: case-insensitive, whitespace-separated terms must "
-        "all appear, or set regex=true. Omit query to list the newest rows. "
-        "Every hit shows its layer/key and source battle."
+        "Search this ruleset/season's memory (facts and immutable atoms). "
+        "Field filters: subject (species/roster key), kind (set/event/trait/lesson/matchup), "
+        "archetype tag, min_priority, since (YYYY-MM-DD). A free-text query uses grep "
+        "semantics: whitespace-separated terms are ANDed; regex=true switches to one regex. "
+        "Returns at most `limit` rows with provenance. Use memory_read for a full profile."
     )
     input_schema = {
         "type": "object",
         "properties": {
-            "query": {
+            "query": {"type": "string", "description": "Free-text grep pattern (optional)."},
+            "subject": {"type": "string", "description": "Exact subject key (e.g. incineroar, opp-3f9a)."},
+            "kind": {
                 "type": "string",
-                "description": (
-                    "Terms to search for (all must appear). E.g. "
-                    "'incineroar fake out' or 'perish'. Omit for newest rows."
-                ),
+                "enum": ["set", "event", "trait", "lesson", "matchup"],
+                "description": "Optional kind filter.",
             },
-            "level": {
+            "archetype": {"type": "string", "description": "Archetype/tactic tag to require."},
+            "min_priority": {"type": "integer", "minimum": 0, "maximum": 100},
+            "since": {"type": "string", "description": "Earliest event date, YYYY-MM-DD."},
+            "scope": {
                 "type": "string",
-                "enum": ["all", *LEVELS],
-                "default": "all",
-                "description": "Restrict to one memory layer.",
+                "enum": ["facts", "atoms", "all"],
+                "description": "Which layer to search (default: facts).",
             },
-            "key": {
-                "type": "string",
-                "description": (
-                    "Restrict to one file key, e.g. a species ('incineroar'), "
-                    "team key ('team-fairytail'), or tactic id ('perish_trap')."
-                ),
-            },
-            "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 50,
-                "description": "Maximum rows to return (default from config).",
-            },
-            "regex": {
-                "type": "boolean",
-                "default": False,
-                "description": "Treat query as one regular expression.",
-            },
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            "regex": {"type": "boolean", "description": "Treat query as one regular expression."},
         },
         "required": [],
     }
@@ -92,60 +155,132 @@ class MemorySearchTool(Tool):
         self,
         ctx: ToolContext,
         query: str | None = None,
-        level: str = "all",
-        key: str | None = None,
+        subject: str | None = None,
+        kind: str | None = None,
+        archetype: str | None = None,
+        min_priority: int | None = None,
+        since: str | None = None,
+        scope: str = "facts",
         limit: int | None = None,
         regex: bool = False,
     ) -> str:
-        config = ctx.config
-        if limit is None:
-            limit = getattr(config, "memory_search_limit", 8)
-        limit = max(1, min(int(limit), 50))
-        if level not in ("all", *LEVELS):
-            raise ToolError(f"unknown level {level!r}; use: all, {', '.join(LEVELS)}")
-        store = _store(config, getattr(ctx.kb, "profile", None))
+        _check_budget(ctx)
+        mem_scope, root, config = _context(ctx)
+        layer = (scope or "facts").lower()
+        if layer not in ("facts", "atoms", "all"):
+            raise ToolError(f"unknown scope {scope!r}; use facts, atoms or all")
         try:
-            lines, total = store.search(
-                query, level=level, key=key, limit=limit, regex=regex
-            )
+            q = Query(query, regex=regex)
         except ValueError as exc:
-            raise ToolError(str(exc)) from exc
-        if not lines:
-            what = f"matching {query!r}" if query else ""
-            return f"no memory rows {what}".strip() + f" (searched {level})."
-        body = "\n".join(line.render() for line in lines)
-        footer = (
-            f"\n({total} match{'es' if total != 1 else ''}; showing {len(lines)} "
-            f"— narrow with level= or key=)"
+            raise ToolError(str(exc))
+        limit = max(1, min(50, int(limit or 8)))
+        subject_key = _normalize_subject(subject)
+        archetype_key = sanitize_key(archetype) if archetype else ""
+        since_text = (since or "").strip()
+        min_p = max(0, min(100, int(min_priority or 0)))
+        hits: list["FactLine"] = []
+        for row, _root in _iter_rows(_roots(config, mem_scope, root), layer):
+            if _matches(
+                row,
+                subject=subject_key,
+                kind=(kind or "").strip(),
+                archetype=archetype_key,
+                min_priority=min_p,
+                since=since_text,
+                query=q,
+            ):
+                hits.append(row)
+        hits.sort(
+            key=lambda row: (-row.priority, -row.evidence, row.date, row.id)
         )
-        return _clip(body + footer)
+        if not hits:
+            return f"no memory rows matched in {root}"
+        shown = hits[:limit]
+        lines = [_render_row(row) for row in shown]
+        footer = f"\n({len(hits)} match(es); showing {len(shown)} — narrow with subject/kind/archetype)"
+        return _clip("\n".join(lines) + footer)
+
+
+class MemoryReadTool(Tool):
+    name = "memory_read"
+    description = (
+        "Read one full memory profile by key (species id, opp- roster key, archetype id, "
+        "or team-/our- key). Returns a deterministic summary, the narrative, and the "
+        "observed/prior fact lines, capped to the configured budget."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string", "description": "Scene key to read."},
+        },
+        "required": ["key"],
+    }
+
+    async def execute(self, ctx: ToolContext, key: str | None = None) -> str:
+        _check_budget(ctx)
+        mem_scope, root, config = _context(ctx)
+        if not key:
+            raise ToolError("key is required")
+        found = scene_for_key(root, key)
+        if found is None:
+            return f"no memory profile for {key!r} in {root}"
+        kind, scene = found
+        meta = scene.get("meta") or {}
+        parts = [
+            f"[{kind}] {scene.get('key')} (season {meta.get('season') or '-'}, "
+            f"source {meta.get('source') or '-'})",
+            f"summary: {meta.get('summary') or ''}",
+        ]
+        narrative = str(scene.get("narrative") or "").strip()
+        if narrative:
+            parts.append("narrative: " + narrative)
+        facts_path = root / "facts" / {
+            "species": "species",
+            "team": "teams",
+            "archetype": "archetypes",
+            "our": "our",
+        }.get(kind, kind) / f"{scene.get('key')}.ndjson"
+        rows = memory_facts.read_fact_file(facts_path)
+        prior = [row for row in rows if row.maturity == "prior"]
+        observed = [row for row in rows if row.maturity != "prior"]
+        if prior:
+            parts.append("[PRIOR]\n" + "\n".join(_render_row(row) for row in prior))
+        if observed:
+            parts.append("[OBSERVED]\n" + "\n".join(_render_row(row) for row in observed))
+        limit = int(getattr(config, "memory_read_chars", 2000))
+        return _clip("\n".join(parts), limit=limit)
 
 
 class MemoryStatsTool(Tool):
     name = "memory_stats"
     description = (
-        "Summarize the cross-battle memory corpus: how many rows and keys each "
-        "layer holds (species / teams / tactics / battles) and how much is "
-        "remembered overall. Use before searching to see whether anything "
-        "relevant exists."
+        "Summarise what this ruleset/season remembers: scene counts by kind, fact counts "
+        "by maturity/source, and the memory root."
     )
     input_schema = {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, ctx: ToolContext) -> str:
-        store = _store(ctx.config, getattr(ctx.kb, "profile", None))
-        stats = store.stats()
-        grand = sum(v["total"] for v in stats.values())
-        if grand == 0:
-            return f"memory is empty ({store.root}) — no finished battles recorded yet."
-        lines = [f"memory root: {store.root}", f"total rows: {grand}"]
-        for level in LEVELS:
-            entry = stats[level]
-            keys = entry["keys"]
-            if not keys:
-                continue
-            top = sorted(keys.items(), key=lambda kv: -kv[1])[:6]
-            lines.append(
-                f"- {level}: {entry['total']} rows / {len(keys)} keys "
-                f"(top: {', '.join(f'{k}×{n}' for k, n in top)})"
-            )
-        return "\n".join(lines)
+        _check_budget(ctx)
+        mem_scope, root, config = _context(ctx)
+        if not root.is_dir():
+            return f"memory is empty ({root}) — no battles recorded yet."
+        scene_counts: dict[str, int] = {}
+        for kind in ("species", "teams", "archetypes", "our"):
+            directory = root / "scenes" / kind
+            scene_counts[kind] = len(list(directory.glob("*.json"))) if directory.is_dir() else 0
+        maturity: dict[str, int] = {}
+        sources: dict[str, int] = {}
+        total = 0
+        for path in memory_facts.iter_fact_files(root):
+            for row in memory_facts.read_fact_file(path):
+                total += 1
+                maturity[row.maturity] = maturity.get(row.maturity, 0) + 1
+                sources[row.source] = sources.get(row.source, 0) + 1
+        lines = [
+            f"scope: {mem_scope}",
+            f"root: {root}",
+            "scenes: " + ", ".join(f"{k}={v}" for k, v in scene_counts.items()),
+            f"facts: {total} (" + ", ".join(f"{k}={v}" for k, v in sorted(maturity.items())) + ")",
+            "sources: " + ", ".join(f"{k}={v}" for k, v in sorted(sources.items())),
+        ]
+        return _clip("\n".join(lines))

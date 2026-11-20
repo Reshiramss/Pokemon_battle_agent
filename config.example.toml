@@ -8,10 +8,10 @@ model = "your-model-name"
 # api_key = "sk-..."                           # unset -> OPENAI_API_KEY (openai) / ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN (anthropic)
 # max_tokens_per_call = 4000                   # reasoning models need headroom for hidden thinking tokens
 # reasoning_effort = "low"                     # deepseek-flash: low|high|max; unset -> not sent (model default)
-# battle_format = "gen9vgc2025regihidden"       # default: doubles VGC 6-pick-4, no team sheets
-# battle_format = "gen9randombattle"            # singles; no team needed
-# battle_format = "gen9championsvgc2026regmchidden"  # Pokémon Champions doubles 6-pick-4 (stat points, Mega, no Tera)
-# battle_format = "gen9championsvgc2026regmc"   # official Champion VGC format (VGC Timer)
+# battle_format = "gen9championsvgc2026regmchidden"   # default: Champions doubles 6-pick-4 (stat points, Mega, no Tera)
+# battle_format = "gen9championsvgc2026regmc"         # official Champion VGC format (VGC Timer)
+# battle_format = "gen9vgc2025regihidden"             # standard Gen 9 VGC 6-pick-4, no team sheets
+# battle_format = "gen9randombattle"                  # singles; no team needed
 # team = "Shadow Bolt"                          # library name (see teams/) or raw packed string
 # team = "Champions A"                          # Champion teams use Stat Points (0-32, total <=66)
 # teams_dir = "/path/to/your/teams"             # optional user import dir, merged into the library
@@ -21,18 +21,31 @@ server_port = 8964                             # must match your Showdown server
 # --- reasoning memory (harness state; see docs/harness_state.md) ---
 # enable_reasoning_notes = true                 # per-turn CoT -> structured note for [REFLECTION]
 # reasoning_note_input_chars = 6000             # CoT chars sent to the note model
-# reasoning_note_max_tokens = 350
+# reasoning_note_max_tokens = 1500              # hidden thinking is spent from this budget first
 # enable_strategy_brief = true                  # rolling [STRATEGY] brief rewritten by the cheap model
 # reasoning_brief_every = 2                     # rewrite after this many new notes (one in flight)
 # reasoning_brief_input_chars = 4000            # brief-model input budget
-# reasoning_brief_max_tokens = 400
-# --- cross-battle memory (layered JSONL + grep retrieval) ---
-# enable_memory = true                          # write finished battles and expose memory tools/hook
+# reasoning_brief_max_tokens = 1200
+# --- battle-level COT (how this game is won; rendered as [STRATEGY]) ---
+# enable_strategy_cot = true                    # background sub-agent rewrites it after every turn
+# strategy_cot_max_tokens = 3000                # main model; thinking is spent from this budget
+# strategy_cot_input_chars = 8000               # previous COT + board + thinking + plan
+# thinking_record_chars = 5000                  # thinking kept on TurnRecord (head+tail)
+# --- cross-battle memory (atoms -> scenes -> grep facts) ---
+# enable_memory = true                          # write finished battles, build the index, expose memory tools
 # memory_dir = "runs/_memory"                   # default: <runs_dir>/_memory
-# memory_lines_cap = 500                        # rows kept per key file (older rows are compacted)
-# memory_hook_max_lines = 3                     # [MEMORY] fragment: newest rows per matchup key
-# memory_hook_chars = 250                       # [MEMORY] fragment character budget
-# memory_search_limit = 8                       # default memory_search result count
+# default_regulation = "auto"                   # auto = parse regmc/regmb/regi from the format id
+# allow_previous_seasons = true                 # older seasons stay readable with a ranking decay
+# previous_season_decay = 0.6
+# seed_on_first_run = true                      # seed archetypes + our teams on first use
+# seed_champions_sets = true                    # use the curated Champions random-battle pools as priors
+# prior_rank_weight = 0.6                       # priors rank below observations
+# memory_index_chars_preview = 1200             # stable [MEMORY INDEX] budget (system prompt)
+# memory_recall_chars_turn = 400                # dynamic [MEMORY RECALL] budget (user prompt)
+# memory_read_chars = 2000                      # memory_read tool output cap
+# memory_tool_calls_per_turn = 3                # memory_grep + memory_read combined
+# cross_ruleset_read = false                    # cross-rule semantic layer is opt-in
+# opponent_class = "unknown"                    # run_battle/human_battle set this automatically
 # --- Smogon usage stats (offline snapshot; see scripts/fetch_usage_snapshot.py) ---
 # smogon_stats_snapshot = "pokeagent/data/usage/2026-10/gen9vgc2025regi-0.json.gz"
 # smogon_stats_format = "gen9vgc2025regi"       # real ladder id; never the hidden format

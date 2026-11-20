@@ -35,12 +35,20 @@ class ToolCallRequest:
 @dataclass
 class LLMResponse:
     text: str | None = None  # assistant reasoning / plain text (the CoT)
+    # Reasoning-model thinking (Anthropic ``thinking`` blocks, OpenAI
+    # ``reasoning_content``). It is NOT part of ``text``: it is never
+    # re-sent to the model and never rendered into the prompt. Kept so the
+    # llm.jsonl trace shows what the model actually reasoned instead of an
+    # empty answer.
+    thinking: str | None = None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     # normalized stop reasons: end_turn | tool_use | max_tokens | error
     stop_reason: str = "end_turn"
     error: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    # usage-side thinking count: nonzero even when the text is hidden/redacted
+    thinking_tokens: int = 0
 
 
 @dataclass

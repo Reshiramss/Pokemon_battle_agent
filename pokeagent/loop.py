@@ -242,9 +242,11 @@ class TurnOutcome:
     reason: str
     rounds: int
     cot: str = ""
+    thinking: str = ""  # hidden reasoning, joined across rounds (capped later)
     tool_calls: list[dict] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    thinking_tokens: int = 0
 
 
 @dataclass
@@ -255,9 +257,11 @@ class PreviewOutcome:
     reason: str
     rounds: int
     cot: str = ""
+    thinking: str = ""
     tool_calls: list[dict] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    thinking_tokens: int = 0
 
 
 @dataclass
@@ -269,17 +273,26 @@ class _TurnState:
     """
 
     cot_parts: list[str] = field(default_factory=list)
+    thinking_parts: list[str] = field(default_factory=list)
     tool_log: list[dict] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    thinking_tokens: int = 0
     rounds: int = 0
 
     def account(self, resp) -> None:
         self.input_tokens += resp.input_tokens
         self.output_tokens += resp.output_tokens
+        # thinking is already inside output_tokens; the separate count is what
+        # postmortem needs to tell a quiet turn from a truncated one
+        self.thinking_tokens += resp.thinking_tokens or 0
         self.rounds += 1
-        if resp.text:
+        # whitespace-only content is not reasoning; counting it made
+        # postmortem claim "CoT logged 12/13" while the model said nothing
+        if resp.text and resp.text.strip():
             self.cot_parts.append(resp.text)
+        if resp.thinking:
+            self.thinking_parts.append(resp.thinking)
 
     def log_tools(self, calls, round_: int) -> None:
         for call in calls:
@@ -339,6 +352,8 @@ class AgentLoop:
         submit_team terminal tool, bounded by the same budgets.
         """
         config = self.config
+        if getattr(cm, "begin_turn", None):
+            cm.begin_turn()
         ctx = ToolContext(battle=battle, kb=cm.kb, context=cm, config=config)
 
         fragments = await self.hooks.run_pre(ctx, config.hook_budget)
@@ -356,6 +371,8 @@ class AgentLoop:
             my_team=team_lines or "(unknown)",
             opponent_team=opp_lines or "(unknown)",
         )
+        if getattr(cm, "memory_index", ""):
+            system = system + "\n\n" + cm.memory_index
         pick = preview_pick_count(battle)
         leads_hint = (
             "The first two slots of your order are the leads."
@@ -371,8 +388,9 @@ class AgentLoop:
 
         tool_specs = self.registry.specs() + [SUBMIT_TEAM]
         cot_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_log: list[dict] = []
-        in_tokens = out_tokens = 0
+        in_tokens = out_tokens = thinking_tokens = 0
         trace = config.log_llm_conversation
         messages = [UserMessage(user)]
 
@@ -395,8 +413,11 @@ class AgentLoop:
             )
             in_tokens += resp.input_tokens
             out_tokens += resp.output_tokens
-            if resp.text:
+            thinking_tokens += resp.thinking_tokens or 0
+            if resp.text and resp.text.strip():
                 cot_parts.append(resp.text)
+            if resp.thinking:
+                thinking_parts.append(resp.thinking)
 
             if resp.stop_reason == "error":
                 if trace:
@@ -410,8 +431,7 @@ class AgentLoop:
                 AssistantMessage(content=resp.text, tool_calls=list(resp.tool_calls))
             )
             if trace:
-                cm.log_llm(
-                    "llm_response",
+                entry = dict(
                     turn=0,
                     phase="preview",
                     round=round_,
@@ -423,7 +443,11 @@ class AgentLoop:
                     stop_reason=resp.stop_reason,
                     input_tokens=resp.input_tokens,
                     output_tokens=resp.output_tokens,
+                    thinking_tokens=resp.thinking_tokens,
                 )
+                if config.log_thinking and resp.thinking:
+                    entry["thinking"] = resp.thinking
+                cm.log_llm("llm_response", **entry)
             for call in resp.tool_calls:
                 tool_log.append(
                     {"round": round_, "name": call.name, "arguments": call.arguments}
@@ -440,9 +464,11 @@ class AgentLoop:
                         reason=reason,
                         rounds=round_ + 1,
                         cot="\n\n".join(cot_parts),
+                        thinking="\n\n".join(thinking_parts),
                         tool_calls=tool_log,
                         input_tokens=in_tokens,
                         output_tokens=out_tokens,
+                        thinking_tokens=thinking_tokens,
                     )
                 # invalid order: let the model retry with a clear error
                 other_calls = [c for c in resp.tool_calls if c.name != "submit_team"]
@@ -526,6 +552,8 @@ class AgentLoop:
 
     async def run_turn(self, battle, cm: ContextManager) -> TurnOutcome:
         config = self.config
+        if getattr(cm, "begin_turn", None):
+            cm.begin_turn()
         ctx = ToolContext(battle=battle, kb=cm.kb, context=cm, config=config)
         trace = config.log_llm_conversation
 
@@ -750,8 +778,7 @@ class AgentLoop:
             max_tokens=config.max_tokens_per_call,
         )
         if config.log_llm_conversation:
-            cm.log_llm(
-                "llm_response",
+            entry = dict(
                 turn=turn,
                 phase=phase,
                 round=round_,
@@ -763,7 +790,11 @@ class AgentLoop:
                 stop_reason=resp.stop_reason,
                 input_tokens=resp.input_tokens,
                 output_tokens=resp.output_tokens,
+                thinking_tokens=resp.thinking_tokens,
             )
+            if config.log_thinking and resp.thinking:
+                entry["thinking"] = resp.thinking
+            cm.log_llm("llm_response", **entry)
         if resp.stop_reason == "error":
             if config.log_llm_conversation:
                 cm.log_llm(
@@ -805,9 +836,11 @@ class AgentLoop:
             reason=reason,
             rounds=state.rounds,
             cot="\n\n".join(state.cot_parts),
+            thinking="\n\n".join(state.thinking_parts),
             tool_calls=state.tool_log,
             input_tokens=state.input_tokens,
             output_tokens=state.output_tokens,
+            thinking_tokens=state.thinking_tokens,
         )
 
     # --- internals -----------------------------------------------------------

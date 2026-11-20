@@ -28,7 +28,7 @@ def read_run(run_dir: Path) -> dict | None:
     if not events_path.is_file():
         return None
     turns, fallbacks, subagents, elapsed = [], 0, 0, []
-    in_tok = out_tok = 0
+    in_tok = out_tok = thinking_tok = 0
     compressed = 0
     won = lost = None
     for line in events_path.read_text(encoding="utf-8").splitlines():
@@ -44,6 +44,7 @@ def read_run(run_dir: Path) -> dict | None:
             elapsed.append(float(entry.get("elapsed_s") or 0))
             in_tok += int(entry.get("input_tokens") or 0)
             out_tok += int(entry.get("output_tokens") or 0)
+            thinking_tok += int(entry.get("thinking_tokens") or 0)
             if entry.get("cot"):
                 pass  # CoT present; not counted, just recorded verbatim on disk
         elif kind == "subagent_done":
@@ -67,6 +68,7 @@ def read_run(run_dir: Path) -> dict | None:
         "elapsed": elapsed,
         "in_tokens": in_tok,
         "out_tokens": out_tok,
+        "thinking_tokens": thinking_tok,
         "won": won,
         "lost": lost,
     }
@@ -76,13 +78,25 @@ def fmt(result: dict) -> str:
     outcome = {True: "WIN", False: "LOSS", None: "?"}[result["won"]]
     mean = sum(result["elapsed"]) / len(result["elapsed"]) if result["elapsed"] else 0
     p95 = percentile(result["elapsed"], 95)
+    # thinking is a subset of output tokens: on a reasoning model it can be
+    # ~all of them, which is why "CoT logged" can be near zero
+    think_share = (
+        result["thinking_tokens"] / result["out_tokens"]
+        if result["out_tokens"]
+        else 0.0
+    )
     return (
         f"{result['run']}: {outcome} | turns {result['turns']} "
         f"| fallbacks {result['fallbacks']} ({result['fallback_rate']:.0%}) "
         f"| CoT logged {result['cot_logged']}/{result['turns']} "
         f"| latency mean {mean:.1f}s p95 {p95:.1f}s "
         f"| tokens in {result['in_tokens']} out {result['out_tokens']} "
-        f"| sub-agents {result['subagents']} | compressions {result['compressions']}"
+        + (
+            f"(thinking {result['thinking_tokens']}, {think_share:.0%} of out) "
+            if result["thinking_tokens"]
+            else ""
+        )
+        + f"| sub-agents {result['subagents']} | compressions {result['compressions']}"
     )
 
 
@@ -119,12 +133,19 @@ def main() -> None:
     total_turns = sum(r["turns"] for r in results)
     total_fb = sum(r["fallbacks"] for r in results)
     all_elapsed = [e for r in results for e in r["elapsed"]]
+    total_out = sum(r["out_tokens"] for r in results)
+    total_think = sum(r["thinking_tokens"] for r in results)
+    think_share = total_think / total_out if total_out else 0.0
     print("-" * 72)
+    think = (
+        f"thinking {think_share:.0%} of output tokens, " if total_think else ""
+    )
     print(
         f"TOTAL: {len(results)} battles, {total_turns} turns, "
         f"fallback rate {total_fb / total_turns:.1%}, "
         f"latency mean {sum(all_elapsed) / len(all_elapsed):.1f}s "
         f"p95 {percentile(all_elapsed, 95):.1f}s, "
+        f"{think}"
         f"sub-agents {sum(r['subagents'] for r in results)}, "
         f"wins {sum(1 for r in results if r['won'])}"
     )

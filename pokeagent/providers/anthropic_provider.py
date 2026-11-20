@@ -141,16 +141,32 @@ class AnthropicProvider(LLMProvider):
             )
 
         text = "\n".join(b.text for b in response.content if b.type == "text") or None
+        # reasoning models answer inside ``thinking`` blocks; only the visible
+        # text is assistant content, so the two are kept apart. Gateway
+        # thinking often comes back without a signature, so it cannot be
+        # echoed into the next request either way — but it still documents
+        # what the model saw and why it acted.
+        thinking = (
+            "\n\n".join(
+                b.thinking
+                for b in response.content
+                if getattr(b, "type", "") == "thinking" and getattr(b, "thinking", None)
+            )
+            or None
+        )
         tool_calls = [
             ToolCallRequest(id=b.id, name=b.name, arguments=dict(b.input))
             for b in response.content
             if b.type == "tool_use"
         ]
         usage = getattr(response, "usage", None)
+        details = getattr(usage, "output_tokens_details", None)
         return LLMResponse(
             text=text,
+            thinking=thinking,
             tool_calls=tool_calls,
             stop_reason=response.stop_reason or "end_turn",
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            thinking_tokens=getattr(details, "thinking_tokens", 0) or 0,
         )

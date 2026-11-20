@@ -17,7 +17,7 @@ from poke_env.battle import PokemonType, Status
 from pokeagent.config import AgentConfig
 from pokeagent.context.manager import ContextManager
 from pokeagent.context.records import snapshot
-from pokeagent.state import BattleState, ReasoningNote, render_observed
+from pokeagent.state import BattleState, GlobalCOT, ReasoningNote, render_observed
 from test_preview import make_preview_double_battle
 
 
@@ -111,6 +111,30 @@ def test_json_round_trip_preserves_render():
     assert clone.resources.tera_used == ["gyarados"]
 
 
+def test_global_cot_json_round_trip_and_legacy_migration():
+    state = BattleState()
+    state.ledger.global_cot = GlobalCOT(
+        text="hold mid, trade tera on turn 6", turn=4, seq=4, source="llm"
+    )
+
+    restored = BattleState.from_json(json.loads(json.dumps(state.to_json())))
+    assert restored.ledger.global_cot.text == state.ledger.global_cot.text
+    assert restored.ledger.global_cot.seq == 4
+    assert restored.ledger.global_cot.source == "llm"
+
+    # a plain-string form (older/parallel state) still loads
+    legacy = json.loads(json.dumps(state.to_json()))
+    legacy["ledger"]["global_cot"] = "plain text plan"
+    migrated = BattleState.from_json(legacy)
+    assert migrated.ledger.global_cot.source == "legacy"
+    assert migrated.ledger.global_cot.text == "plain text plan"
+
+    # absent key -> None (old state.json files keep loading)
+    data = json.loads(json.dumps(state.to_json()))
+    data["ledger"].pop("global_cot")
+    assert BattleState.from_json(data).ledger.global_cot is None
+
+
 def test_preview_state_hides_foe_hp_and_records_pick():
     battle = make_preview_double_battle()
     battle._teampreview = True
@@ -144,7 +168,7 @@ def test_preview_selection_markers_render():
 
 def test_manager_renders_and_saves_state(tmp_path):
     battle = make_double_battle()
-    config = AgentConfig(runs_dir=tmp_path / "runs")
+    config = AgentConfig(runs_dir=tmp_path / "runs", battle_format=battle.format)
     cm = ContextManager(battle_tag=battle.battle_tag, config=config, kb=None)
     cm.state = BattleState.create(battle)
     cm.battle_kb = cm.state.kb

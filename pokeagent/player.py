@@ -28,6 +28,7 @@ from .formats import FormatProfile, profile_for
 from .stats import own_stats
 from .context.brief import LLMBriefCompressor
 from .context.compressor import LLMCompressor
+from .context.cot import cap_thinking
 from .context.manager import ContextManager
 from .context.reasoning import DeterministicNoteExtractor, LLMNoteExtractor
 from .context.records import TurnRecord, preview_pick_count
@@ -120,6 +121,10 @@ class PokeAgent(Player):
         self.loop.on_new_opponent_mon = self._fire_threat_analysis
         self._contexts: dict[str, ContextManager] = {}
         self._threat_counts: dict[str, int] = {}
+        # strategy-COT maintenance is single-flight per battle; a turn that
+        # arrives while one is running is coalesced into one pending update
+        self._cot_in_flight: dict[str, bool] = {}
+        self._cot_pending: dict[str, TurnRecord] = {}
 
         super().__init__(
             battle_format=config.battle_format,
@@ -139,6 +144,7 @@ class PokeAgent(Player):
         if not self.config.enable_subagents:
             return None
         from .tasks.post_battle import PostBattleReviewAgent
+        from .tasks.strategy_cot import StrategyCOTAgent
         from .tasks.team_preview import TeamPreviewAnalysisAgent
         from .tasks.threat_analysis import NewMonThreatAgent
 
@@ -151,6 +157,15 @@ class PokeAgent(Player):
             PostBattleReviewAgent(provider),
         ):
             runner.register(agent)
+        # the battle plan is the one background job worth the main model
+        if self.config.enable_strategy_cot:
+            runner.register(
+                StrategyCOTAgent(
+                    self.provider,
+                    max_tokens=self.config.strategy_cot_max_tokens,
+                    input_chars=self.config.strategy_cot_input_chars,
+                )
+            )
         return runner
 
     def _default_registry(self) -> ToolRegistry:
@@ -176,9 +191,9 @@ class PokeAgent(Player):
             TeamCompTool(),
         ]
         if self.config.enable_memory:
-            from .tools.memory import MemorySearchTool, MemoryStatsTool
+            from .tools.memory import MemoryGrepTool, MemoryReadTool, MemoryStatsTool
 
-            tools.extend([MemorySearchTool(), MemoryStatsTool()])
+            tools.extend([MemoryGrepTool(), MemoryReadTool(), MemoryStatsTool()])
         return tools
 
     def _default_hooks(self) -> HookSystem:
@@ -197,10 +212,6 @@ class PokeAgent(Player):
         hooks.register_pre(MoveEffectsHook())
         hooks.register_pre(MechanicsHook())
         hooks.register_pre(SmogonUsageHook(self.config))
-        if self.config.enable_memory:
-            from .hooks.memory_hook import MemoryHook
-
-            hooks.register_pre(MemoryHook(self.config, profile=self.profile))
         return hooks
 
     # --- poke-env lifecycle ---------------------------------------------------
@@ -242,11 +253,23 @@ class PokeAgent(Player):
                     input_chars=self.config.reasoning_brief_input_chars,
                 )
             self._contexts[battle.battle_tag] = cm
+            if self.config.enable_memory:
+                try:
+                    from .memory.recall import build_index
+
+                    build_index(battle, cm, self.config, profile=self.profile)
+                except Exception as exc:  # memory must never block a battle
+                    logger.warning("memory index build failed: %s", exc)
         return cm
 
     async def choose_move(self, battle: "AbstractBattle") -> "BattleOrder":
         cm = self._context_for(battle)
         self._refresh_battle_kb(battle, cm)
+        if battle.turn == 1:
+            # preview formats already seeded from the pick; randbats and any
+            # missing-reason path get a deterministic opening line here so
+            # the very first decision already has a [STRATEGY] plan
+            cm.seed_global_cot(turn=1)
         ctx = ToolContext(battle=battle, kb=cm.kb, context=cm, config=self.config)
         started = time.monotonic()
 
@@ -278,12 +301,15 @@ class PokeAgent(Player):
             decision=outcome.decision,
             reason=outcome.reason,
             cot=outcome.cot or None,
+            thinking=self._record_thinking(outcome.thinking),
             tool_calls=outcome.tool_calls,
             input_tokens=outcome.input_tokens,
             output_tokens=outcome.output_tokens,
+            thinking_tokens=outcome.thinking_tokens,
             elapsed_s=round(elapsed, 2),
         )
         cm.record_turn(record)
+        self._fire_strategy_cot(battle, cm, record)
         await self.hooks.run_post(
             ctx, decision=record.decision, elapsed_s=elapsed, fell_back=False
         )
@@ -409,11 +435,99 @@ class PokeAgent(Player):
             elapsed_s=round(time.monotonic() - started, 2),
         )
         cm.record_turn(record)
+        # a fallback turn still changed the board; let the plan react to it
+        self._fire_strategy_cot(battle, cm, record)
         await self.hooks.run_post(
             ctx, decision="random_fallback", elapsed_s=record.elapsed_s, fell_back=True
         )
 
     # --- background sub-agents -------------------------------------------------
+
+    def _record_thinking(self, text: str | None) -> str | None:
+        """Thinking kept on the record: head + tail, capped by config.
+
+        The full text is already in llm.jsonl; the record only needs enough
+        to drive the COT maintainer and the [REFLECTION] excerpt.
+        """
+        limit = self.config.thinking_record_chars
+        if not text or limit <= 0:
+            return None
+        head = min(1500, max(0, limit // 3))
+        return cap_thinking(text, head=head, tail=max(0, limit - head))
+
+    def _fire_strategy_cot(
+        self, battle: "AbstractBattle", cm: ContextManager, record: TurnRecord
+    ) -> None:
+        """Rewrite the battle COT off the critical path (main model).
+
+        One call in flight per battle: turns that arrive meanwhile coalesce
+        into a single pending update, which runs right after the current one
+        finishes. The callback writes through ``ContextManager`` (seq-fenced),
+        so a slow older answer can never overwrite a newer plan.
+        """
+        if self.runner is None or self.runner.get("strategy_cot") is None:
+            return
+        if not self.config.enable_strategy_cot:
+            return
+        tag = battle.battle_tag
+        if self._cot_in_flight.get(tag):
+            self._cot_pending[tag] = record
+            return
+
+        state = cm.state
+        previous = (
+            cm.ledger.global_cot.text
+            if cm.ledger.global_cot is not None
+            else None
+        )
+        sctx = SubAgentContext(
+            battle=battle,
+            kb=self.kb,
+            intel=cm.intel,
+            inputs={
+                "record": record,
+                # record.events are the outcome of the *previous* decision
+                "previous_record": cm.record_before(record.seq),
+                "turn": record.turn,
+                "seq": record.seq,
+                "previous": previous,
+                "board": record.request,
+                "plan": state.plan if state is not None else None,
+            },
+        )
+
+        def _done(text: str) -> None:
+            cm.store_global_cot(
+                text,
+                turn=record.turn,
+                seq=record.seq,
+                source=str(sctx.inputs.get("cot_source") or "llm"),
+            )
+
+        self._cot_in_flight[tag] = True
+        task = self.runner.submit(
+            tag,
+            "strategy_cot",
+            sctx,
+            cm=cm,
+            intel_key="strategy_cot",
+            store_intel=False,
+            on_result=_done,
+        )
+        if task is None:  # pragma: no cover - agent is always registered here
+            self._cot_in_flight[tag] = False
+            return
+
+        def _cleanup(_task) -> None:
+            self._cot_in_flight.pop(tag, None)
+            pending = self._cot_pending.pop(tag, None)
+            # a cancelled run means the battle is over (or shutting down):
+            # re-firing here would spend a main-model call after
+            # [battle_finished] and re-create the runner's per-tag bookkeeping
+            if pending is not None and not _task.cancelled():
+                self._fire_strategy_cot(battle, cm, pending)
+
+        task.add_done_callback(_cleanup)
 
     def _fire_threat_analysis(self, battle: "AbstractBattle", species: str) -> None:
         """Loop callback: a new opponent species was revealed."""
@@ -515,7 +629,11 @@ class PokeAgent(Player):
             elapsed_s=round(time.monotonic() - started, 2),
             input_tokens=outcome.input_tokens,
             output_tokens=outcome.output_tokens,
+            thinking_tokens=outcome.thinking_tokens,
         )
+        # seed the battle COT from the pick + leads so turn 1 already has a
+        # [STRATEGY] plan; the first turn's maintenance call rewrites it
+        cm.seed_global_cot(outcome.reason, turn=0)
         return "/team " + "".join(str(m) for m in members)
 
     def _battle_finished_callback(self, battle: "AbstractBattle") -> None:
@@ -528,25 +646,26 @@ class PokeAgent(Player):
             won=bool(getattr(battle, "won", False)),
             lost=bool(getattr(battle, "lost", False)),
         )
-        writer = None
         if self.config.enable_memory:
-            from .memory.writer import MemoryWriter
+            try:
+                from .memory.atoms import write_and_merge
 
-            writer = MemoryWriter(self.config, profile=self.profile)
-            counts = writer.write_battle(battle, cm)
-            cm.log_event("memory_written", **counts)
+                counts = write_and_merge(battle, cm, self.config, self.profile)
+                cm.log_event("memory_atoms_written", **counts)
+            except Exception as exc:  # memory must never break the callback
+                logger.warning("memory atomisation failed: %s", exc)
         if self.runner is not None:
             # cancel stale in-battle analyses first, THEN submit the review
             self.runner.cancel_battle(battle.battle_tag)
-            inputs = {"context_manager": cm}
-            if writer is not None:
-                inputs["memory_writer"] = writer
             sctx = SubAgentContext(
                 battle=battle, kb=self.kb, intel=cm.intel,
-                inputs=inputs,
+                inputs={"context_manager": cm},
             )
             self.runner.submit(
                 battle.battle_tag, "post_battle", sctx, cm=cm,
                 intel_key="post_battle_review",
             )
         self._threat_counts.pop(battle.battle_tag, None)
+        # the battle is over: never let a coalesced COT update fire afterwards
+        self._cot_pending.pop(battle.battle_tag, None)
+        self._cot_in_flight.pop(battle.battle_tag, None)

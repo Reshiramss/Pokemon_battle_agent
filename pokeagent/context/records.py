@@ -441,10 +441,17 @@ class TurnRecord:
     event_rows: list[list[str]] = field(default_factory=list)
     decision: str | None = None  # e.g. "move:earthquake"
     reason: str | None = None
-    cot: str | None = None  # assistant reasoning, verbatim
+    cot: str | None = None  # assistant reasoning, verbatim (visible text)
+    # reasoning-model thinking for this turn, capped — the global COT
+    # maintainer and the note extractor read it when cot is empty. The full
+    # text stays in llm.jsonl.
+    thinking: str | None = None
     tool_calls: list[dict] = field(default_factory=list)  # {round, name, arguments}
     input_tokens: int = 0
     output_tokens: int = 0
+    # reasoning-model thinking tokens (subset of output_tokens); the text
+    # itself lives in llm.jsonl, one entry per provider round
+    thinking_tokens: int = 0
     fell_back: bool = False
     fallback_reason: str | None = None
     elapsed_s: float = 0.0

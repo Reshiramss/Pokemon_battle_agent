@@ -34,6 +34,32 @@ _FINISH_REASONS = {
 }
 
 
+def _reasoning_text(message) -> str | None:
+    """Reasoning-model thinking from an OpenAI-shaped message, if any.
+
+    Different servers park it in different fields: DeepSeek uses
+    ``reasoning_content``, vLLM/OpenRouter use ``reasoning``, some gateways
+    send a ``reasoning_details`` list. The OpenAI SDK keeps unmodelled fields
+    in ``model_extra``, so both places are checked.
+    """
+    extra = getattr(message, "model_extra", None) or {}
+    for key in ("reasoning_content", "reasoning"):
+        value = getattr(message, key, None) or extra.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    details = extra.get("reasoning_details") or getattr(message, "reasoning_details", None)
+    if isinstance(details, list):
+        parts = [
+            d.get("text") or d.get("summary")
+            for d in details
+            if isinstance(d, dict)
+        ]
+        joined = "\n\n".join(p for p in parts if p)
+        if joined:
+            return joined
+    return None
+
+
 class OpenAIProvider(LLMProvider):
     def __init__(
         self,
@@ -157,6 +183,7 @@ class OpenAIProvider(LLMProvider):
             )
 
         message = choice.message
+        thinking = _reasoning_text(message)
         tool_calls: list[ToolCallRequest] = []
         for call in getattr(message, "tool_calls", None) or []:
             raw = getattr(call.function, "arguments", "") or ""
@@ -174,10 +201,13 @@ class OpenAIProvider(LLMProvider):
             )
 
         usage = getattr(response, "usage", None)
+        details = getattr(usage, "completion_tokens_details", None)
         return LLMResponse(
             text=message.content or None,
+            thinking=thinking,
             tool_calls=tool_calls,
             stop_reason=_FINISH_REASONS[finish],
             input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            thinking_tokens=getattr(details, "reasoning_tokens", 0) or 0,
         )

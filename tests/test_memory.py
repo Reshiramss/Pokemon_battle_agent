@@ -1,369 +1,471 @@
-"""Cross-battle memory (S4): grep, layered store, writer, hook, tools.
+"""Offline tests for the layered cross-battle memory (v1).
 
-Everything runs offline in tmp dirs — no server, no network, no model.
+No server, no provider, no API key. Real Showdown data bundles are used where
+a species skeleton/archetype needs static data; those tests skip when the
+bundles have not been exported.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from helpers import make_battle
 
 from pokeagent.config import AgentConfig
 from pokeagent.context.manager import ContextManager
-from pokeagent.context.records import TurnRecord
-from pokeagent.hooks.memory_hook import MemoryHook
-from pokeagent.memory.grep import Query, excerpt
-from pokeagent.memory.keys import opponent_key, our_team_key, roster_signature
-from pokeagent.memory.store import CAP_MARKER, MemoryStore
-from pokeagent.memory.tactics import detect_tactics, tactic_ids
-from pokeagent.memory.writer import MemoryWriter
-from pokeagent.state.model import Claim, ReasoningNote
+from pokeagent.formats import profile_for
+from pokeagent.knowledge.showdown_data import get_showdown_data
+from pokeagent.knowledge.static import StaticKB
+from pokeagent.memory import atoms as memory_atoms
+from pokeagent.memory import facts as memory_facts
+from pokeagent.memory import recall, scenes, seed
+from pokeagent.memory import scope as memory_scope
+from pokeagent.memory import schema
+from pokeagent.memory.quality import quality_score
 from pokeagent.tools.base import ToolContext, ToolError
-from pokeagent.tools.battle_query import BattleHistoryTool
-from pokeagent.tools.memory import MemorySearchTool, MemoryStatsTool
+from pokeagent.tools.memory import MemoryGrepTool, MemoryReadTool, MemoryStatsTool
+
+_FORMAT = "gen9championsvgc2026regmchidden"
+_BUNDLE = get_showdown_data("showdown_champions")
+needs_bundle = pytest.mark.skipif(
+    _BUNDLE is None, reason="showdown champions data bundle not exported"
+)
 
 
-def _cfg(tmp_path, **overrides):
-    return AgentConfig(runs_dir=tmp_path / "runs", **overrides)
+def _cfg(tmp_path: Path, **kwargs) -> AgentConfig:
+    return AgentConfig(runs_dir=tmp_path / "runs", **kwargs)
 
 
-def _battle(*, foe=None, ours=None, won=True, turn=9, tag="battle-mem-1"):
-    foe = foe or ["torterra"]
-    ours = ours or ["incineroar"]
-    return SimpleNamespace(
-        battle_tag=tag,
-        turn=turn,
-        won=won,
-        lost=not won,
-        format="gen9vgc2025regihidden",
-        team={
-            f"p1{i}": SimpleNamespace(
-                species=s, revealed_moves=[], known_ability=None, item=None,
-                types=["FIRE"],
-            )
-            for i, s in enumerate(ours)
-        },
-        opponent_team={
-            f"p2{i}": (
-                m
-                if isinstance(m, SimpleNamespace)
-                else SimpleNamespace(
-                    species=m, revealed_moves=[], known_ability=None,
-                    item=None, types=["GRASS"],
-                )
-            )
-            for i, m in enumerate(foe)
-        },
+def _profile(config: AgentConfig | None = None):
+    return profile_for((config or AgentConfig()).battle_format)
+
+
+def _kb(config: AgentConfig | None = None) -> StaticKB:
+    profile = _profile(config)
+    return StaticKB(profile.format_id, profile=profile)
+
+
+def _fact(**kwargs) -> schema.FactLine:
+    defaults = dict(
+        id=schema.fact_id(kwargs.get("kind", "trait"), kwargs.get("subject", "x"), kwargs.get("content", "c")),
+        subject="incineroar",
+        kind="trait",
+        maturity="obs",
+        priority=50,
+        evidence=1,
+        date="2026-11-18",
+        source="obs",
+        content="Intimidate pivot",
     )
+    defaults.update(kwargs)
+    return schema.FactLine(**defaults)
 
 
-# --- grep -------------------------------------------------------------------
+# --- schema / facts ----------------------------------------------------------
 
 
-def test_query_and_semantics():
-    assert Query("fake out").matches("The Fake Out user moved first")
-    assert not Query("fake out perish").matches("Fake Out only")
-    assert not Query("FAKE").matches("quiet turn")
-    assert Query("fake.*out", regex=True).matches("fake out")
-    with pytest.raises(ValueError):
-        Query("(", regex=True)
-    assert Query("").active is False
-    assert Query("").matches("anything")
+def test_fact_line_roundtrip_and_rejects_garbage():
+    row = _fact(archetypes=["rain"], roles=["pivot"], season="regmc", battle="b1")
+    line = schema.format_fact_line(row)
+    parsed = schema.parse_fact_line(line)
+    assert parsed is not None
+    assert parsed.subject == "incineroar"
+    assert parsed.kind == "trait"
+    assert parsed.archetypes == ["rain"]
+    assert parsed.roles == ["pivot"]
+    assert parsed.season == "regmc"
+    assert parsed.battle == "b1"
+    assert schema.parse_fact_line("not a memory line") is None
+    assert schema.parse_fact_line("id=x k=x t=bad | nope") is None
 
 
-def test_excerpt_centres_on_hit():
-    text = "x" * 400 + " torterra underreported " + "y" * 400
-    out = excerpt(text, Query("torterra"), width=100)
-    assert len(out) <= 102
-    assert "torterra" in out
-    assert out.startswith("…") and out.endswith("…")
-
-
-# --- store ------------------------------------------------------------------
-
-
-def test_store_append_dedupe_modes(tmp_path):
-    store = MemoryStore(tmp_path / "m")
-    assert store.append("species", "torterra", "slow wall", battle="b1")
-    # same battle + text: dropped
-    assert not store.append("species", "torterra", "slow wall", battle="b1")
-    assert store.append("species", "torterra", "slow wall", battle="b2")
-    # text dedupe collapses across battles
-    assert not store.append(
-        "species", "torterra", "slow wall", battle="b3", dedupe="text"
-    )
-    assert len(store.read("species", "torterra")) == 2
-
-
-def test_store_cap_compaction_keeps_marker(tmp_path):
-    store = MemoryStore(tmp_path / "m", lines_cap=3)
-    for i in range(4):
-        assert store.append("species", "torterra", f"row {i}", battle=f"b{i}")
-    lines = store.read("species", "torterra")
-    assert len(lines) == 4  # marker + 3 real rows
-    assert lines[0].source == "compacted"
-    assert lines[0].text == CAP_MARKER
-    assert [l.text for l in lines[1:]] == ["row 1", "row 2", "row 3"]
-    # search never returns the marker
-    hits, total = store.search("row", level="species")
-    assert total == 3
-    assert all(h.source != "compacted" for h in hits)
-
-
-def test_store_search_filters_and_newest_first(tmp_path):
-    store = MemoryStore(tmp_path / "m")
-    store.append("species", "a", "fake out every turn", battle="b1", date="2026-01-01")
-    store.append("species", "b", "slow and bulky", battle="b2", date="2026-01-03")
-    store.append("tactics", "perish_trap", "perish song trap wins", battle="b3",
-                 date="2026-01-02")
-    hits, total = store.search("")
-    assert total == 3 and hits[0].date == "2026-01-03"
-    hits, total = store.search("FAKE", level="species")
-    assert total == 1 and hits[0].key == "a"
-    hits, total = store.search("", level="tactics", key="perish_trap")
-    assert total == 1 and hits[0].key == "perish_trap"
-    with pytest.raises(ValueError):
-        store.search("", level="nope")
-
-
-def test_store_skips_corrupt_lines_and_stats_index(tmp_path):
-    store = MemoryStore(tmp_path / "m")
-    store.append("species", "torterra", "row", battle="b1")
-    path = tmp_path / "m" / "species" / "torterra.jsonl"
-    with path.open("a", encoding="utf-8") as f:
-        f.write("{not json\n")
-        f.write(json.dumps({"level": "species", "key": "torterra"}) + "\n")
-    assert [l.text for l in store.read("species", "torterra")] == ["row"]
-    stats = store.stats()
-    assert stats["species"]["total"] == 1
-    store.rebuild_index()
-    index = json.loads((tmp_path / "m" / "index.json").read_text())
-    assert index["levels"]["species"]["keys"] == {"torterra": 1}
-
-
-def test_roster_keys_are_stable():
-    a = opponent_key(["Torterra", "Incineroar"])
-    b = opponent_key(["incineroar", "torterra"])
+def test_fact_id_is_structural_not_count_dependent():
+    a = schema.fact_id("set", "incineroar", "fakeout,partingshot|safetygoggles|intimidate")
+    b = schema.fact_id("set", "incineroar", "fakeout,partingshot|safetygoggles|intimidate")
     assert a == b
-    assert roster_signature(["Torterra"]) == roster_signature(["torterra", "Torterra"])
-    cfg = AgentConfig(team="Shadow Bolt")
-    assert our_team_key(cfg, ["x"]) == "team-shadow-bolt"
-    cfg2 = AgentConfig(team="Pikachu||Static|choiceband|...")
-    assert our_team_key(cfg2, ["Inc ineroar"]).startswith("our-")
+    assert a != schema.fact_id("set", "incineroar", "fakeout,knockoff|safetygoggles|intimidate")
 
 
-# --- tactics ----------------------------------------------------------------
-
-
-def test_detect_tactics_modes():
-    only_song = [{"moves": ["Perish Song"], "ability": "Damp"}]
-    assert "perish_trap" not in tactic_ids(only_song)
-    trap = [{"moves": ["perishsong"], "ability": "Shadow Tag"}]
-    assert "perish_trap" in tactic_ids(trap)
-    rain = [{"moves": [], "ability": "Drizzle"}]
-    assert "rain" in tactic_ids(rain)
-    none = [{"moves": ["tackle"], "ability": None, "item": None}]
-    assert tactic_ids(none) == []
-
-
-# --- writer -----------------------------------------------------------------
-
-
-def test_write_battle_layers_and_index(tmp_path):
-    foe = SimpleNamespace(
-        species="Torterra", revealed_moves=["Perish Song"],
-        known_ability="Shadow Tag", item="leftovers", types=["GRASS", "GROUND"],
-    )
-    battle = _battle(foe=[foe], ours=["Incineroar"])
-    cfg = _cfg(tmp_path)
-    counts = MemoryWriter(cfg).write_battle(battle, cm=None)
-    assert counts == {"species": 1, "teams": 2, "tactics": 1, "battles": 1}
-    store = MemoryStore(cfg.memory_path)
-    species = store.read("species", "torterra")
-    assert "perishsong" in species[0].text and "shadowtag" in species[0].text
-    assert species[0].battle == "battle-mem-1"
-    assert species[0].source == "deterministic"
-    assert store.read("tactics", "perish_trap")
-    assert store.read("teams", opponent_key(["torterra"]))
-    assert store.read("teams", our_team_key(cfg, ["incineroar"]))
-    assert (cfg.memory_path / "index.json").is_file()
-    # deterministic rows are battle-deduped: re-running writes nothing new
-    assert MemoryWriter(cfg).write_battle(battle, cm=None) == {
-        "species": 0, "teams": 0, "tactics": 0, "battles": 0
+def test_project_scene_prior_and_observed_rows():
+    scene = {
+        "kind": "species",
+        "key": "incineroar",
+        "meta": {"season": "regmc", "updated": "2026-11-18T00:00:00Z"},
+        "types": ["Fire", "Dark"],
+        "abilities": ["intimidate"],
+        "roles": ["pivot"],
+        "archetype_tags": ["rain"],
+        "prior_sets": [{"role": "Pivot", "moves": ["fakeout", "partingshot"], "abilities": ["intimidate"]}],
+        "sets": [
+            {
+                "moves": {"fakeout": 2, "partingshot": 2},
+                "item": {"safetygoggles": 2},
+                "ability": {"intimidate": 2},
+                "support": 2,
+                "last_seen": "2026-11-18",
+            }
+        ],
+        "speed_bounds": {"min": 72, "max": 123},
+        "behavior": {"sample": 2, "lead_rate": 0.5},
     }
+    rows = memory_facts.project_scene(scene)
+    kinds = {row.kind for row in rows}
+    assert {"set", "trait"} <= kinds
+    prior = [row for row in rows if row.maturity == "prior" and row.kind == "set"]
+    observed = [row for row in rows if row.maturity != "prior" and row.kind == "set"]
+    assert prior and prior[0].evidence == 0
+    assert observed and observed[0].evidence == 2
 
 
-def test_write_digest_routing_and_cap(tmp_path):
-    foe = SimpleNamespace(
-        species="Torterra", revealed_moves=["perishsong"],
-        known_ability="shadowtag", item=None, types=["GRASS"],
+# --- scope ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "format_id,expected",
+    [
+        ("gen9championsvgc2026regmchidden", "regmc"),
+        ("gen9championsvgc2026regmcbo3", "regmc"),
+        ("gen9championsvgc2026regmb", "regmb"),
+        ("gen9vgc2025regihidden", "regi"),
+        ("gen9ou", "default"),
+    ],
+)
+def test_regulation_parsing(format_id, expected):
+    assert memory_scope.regulation_from_id(format_id) == expected
+
+
+def test_scope_root_and_previous_seasons(tmp_path):
+    config = _cfg(tmp_path)
+    profile = _profile(config)
+    current = memory_scope.scope_from(profile, _FORMAT)
+    root = memory_scope.ensure_scope_root(config, current, _FORMAT)
+    older = memory_scope.scope_from(profile, "gen9championsvgc2026regmb")
+    older_root = memory_scope.ensure_scope_root(config, older, "gen9championsvgc2026regmb")
+    assert root.name == "regmc" and older_root.name == "regmb"
+    roots = memory_scope.previous_season_roots(config, current, limit=2)
+    assert older_root in roots
+
+
+def test_config_default_format_is_champions():
+    assert AgentConfig().battle_format == _FORMAT
+
+
+# --- seed / cold start -------------------------------------------------------
+
+
+@needs_bundle
+def test_species_skeleton_roles_and_speed(tmp_path):
+    config = _cfg(tmp_path, team="Champions A")
+    profile = _profile(config)
+    kb = _kb(config)
+    scope = memory_scope.scope_for_config(config)
+    root = memory_scope.ensure_scope_root(config, scope, _FORMAT)
+    scene = seed.ensure_species_scene(root, scope, "incineroar", kb, profile, config)
+    assert scene is not None
+    assert set(scene["types"]) == {"Fire", "Dark"}
+    assert "intimidate" in scene["abilities"]
+    assert "fake_out" in scene["roles"] or "pivot" in scene["roles"]
+    assert scene["speed_bounds"]["min"] < scene["speed_bounds"]["max"]
+    assert scene["prior_sets"]
+
+
+@needs_bundle
+def test_seed_scope_archetypes_and_our_teams(tmp_path):
+    config = _cfg(tmp_path, team="Champions A")
+    profile = _profile(config)
+    kb = _kb(config)
+    scope = memory_scope.scope_for_config(config)
+    root = memory_scope.ensure_scope_root(config, scope, _FORMAT)
+    counts = seed.seed_scope(root, scope, kb, profile, config)
+    assert counts["archetypes"] >= 4
+    assert counts["our"] >= 1
+    archetypes = list((root / "scenes" / "archetypes").glob("*.json"))
+    assert any(path.stem == "rain" for path in archetypes)
+    coverage = seed.coverage(root, kb, profile, scope, config)
+    assert coverage["lazy_capable"] == 1.0
+    assert coverage["archetype_coverage"] >= 0.6
+    assert coverage["legal_species"] >= 300
+
+
+# --- atoms / quality / merge -------------------------------------------------
+
+
+def _fake_records(fell_back: bool = False, events: list[str] | None = None):
+    return [
+        SimpleNamespace(fell_back=fell_back, events=events or []),
+        SimpleNamespace(fell_back=False, events=[]),
+    ]
+
+
+def test_quality_gates():
+    battle = SimpleNamespace(won=False, lost=True, finished=True, turn=10)
+    cm = SimpleNamespace(records=_fake_records())
+    q = quality_score(battle, cm, "human")
+    assert q["complete"] and q["lesson_ok"]
+    noisy = SimpleNamespace(records=_fake_records(True, ["A critical hit!"]))
+    q_noisy = quality_score(battle, noisy, "random")
+    assert not q_noisy["lesson_ok"]
+
+
+@needs_bundle
+def test_atomize_and_merge_scene_counts(tmp_path):
+    config = _cfg(tmp_path, team="Champions A", opponent_class="human")
+    profile = _profile(config)
+    kb = _kb(config)
+    scope = memory_scope.scope_for_config(config)
+    root = memory_scope.ensure_scope_root(config, scope, _FORMAT)
+    seed.seed_scope(root, scope, kb, profile, config)
+
+    mon = SimpleNamespace(
+        species="torterra",
+        revealed_moves=["earthquake", "protect"],
+        known_ability="overgrow",
+        item="leftovers",
+        tera_type=None,
     )
-    battle = _battle(foe=[foe])
-    cfg = _cfg(tmp_path)
-    writer = MemoryWriter(cfg)
-    digest = "\n".join(
-        [
-            "- Torterra was the key threat on turn 3.",
-            "- Torterra undersped everything relevant.",
-            "- Torterra absorbed the fire damage.",
-            "- Torterra kept the trap together.",
-            "- Perish Song was under-prepared for.",
-            "- Lead with Incineroar pressure next time.",
-        ]
+    our = [SimpleNamespace(species="incineroar"), SimpleNamespace(species="rillaboom")]
+    battle = SimpleNamespace(
+        battle_tag="battle-test-1",
+        format=_FORMAT,
+        won=True,
+        lost=False,
+        finished=True,
+        turn=12,
+        team={str(i): p for i, p in enumerate(our)},
+        opponent_team={"0": mon},
     )
-    counts = writer.write_digest(battle, cm=None, digest=digest)
-    store = MemoryStore(cfg.memory_path)
-    species = store.read("species", "torterra")
-    assert len(species) == 3  # per-key cap
-    assert all(l.source == "post_battle" for l in species)
-    assert species[0].turn == 3  # "turn 3" parsed
-    assert len(store.read("tactics", "perish_trap")) == 1
-    battles = store.read("battles")
-    assert len(battles) == 1
-    assert "Incineroar" in battles[0].text
-    assert counts["species"] == 3 and counts["tactics"] == 1 and counts["battles"] == 1
-    assert writer.write_digest(battle, cm=None, digest="") == {
-        "species": 0, "teams": 0, "tactics": 0, "battles": 0
-    }
+    state = SimpleNamespace(kb=SimpleNamespace(them={"torterra": mon}, us={}))
+    cm = SimpleNamespace(
+        state=state,
+        kb=kb,
+        records=[
+            SimpleNamespace(
+                events=["switch p2a: Torterra Torterra, L50, M 100/100"],
+                fell_back=False,
+            )
+        ],
+    )
+    meta, atom_rows = memory_atoms.atomize_battle(
+        battle, cm, config, profile, root=root
+    )
+    assert meta["result"] == "win"
+    assert any(atom.kind == "set" and atom.subject == "torterra" for atom in atom_rows)
+    atom_path = memory_atoms.write_atoms(root, meta, atom_rows)
+    meta_back, rows_back = memory_facts.read_atoms_file(atom_path)
+    assert meta_back and meta_back["result"] == "win"
+    assert any(row.subject == "torterra" for row in rows_back)
+    merged = scenes.merge_atoms(root, atom_rows, scope)
+    assert merged
+    species_scene = json.loads((root / "scenes" / "species" / "torterra.json").read_text())
+    assert species_scene["sets"]
+    team_scenes = list((root / "scenes" / "teams").glob("*.json"))
+    assert team_scenes
+    team_scene = json.loads(team_scenes[0].read_text())
+    assert team_scene["record"]
+    facts_file = root / "facts" / "species" / "torterra.ndjson"
+    assert facts_file.is_file() and "torterra" in facts_file.read_text()
+
+    # idempotence of the projection
+    before = facts_file.read_text()
+    memory_facts.write_scene_facts(root, species_scene)
+    assert facts_file.read_text() == before
 
 
-# --- hook -------------------------------------------------------------------
+@needs_bundle
+def test_scene_set_clustering(tmp_path):
+    config = _cfg(tmp_path)
+    profile = _profile(config)
+    kb = _kb(config)
+    scope = memory_scope.scope_for_config(config)
+    root = memory_scope.ensure_scope_root(config, scope, _FORMAT)
+    first = memory_atoms.Atom(
+        scene_kind="species",
+        subject="torterra",
+        kind="set",
+        content="x",
+        date="2026-11-18",
+        event_time="2026-11-18T00:00:00Z",
+        battle="b1",
+        metadata={"moves": ["earthquake", "protect", "woodhammer", "stealthrock"],
+                  "item": "leftovers", "ability": "overgrow", "tera": ""},
+    )
+    second = memory_atoms.Atom(
+        scene_kind="species",
+        subject="torterra",
+        kind="set",
+        content="x",
+        date="2026-11-19",
+        event_time="2026-11-19T00:00:00Z",
+        battle="b2",
+        metadata={"moves": ["earthquake", "protect", "woodhammer", "stoneedge"],
+                  "item": "leftovers", "ability": "overgrow", "tera": ""},
+    )
+    scenes.merge_atoms(root, [first, second], scope)
+    scene = json.loads((root / "scenes" / "species" / "torterra.json").read_text())
+    assert len(scene["sets"]) == 1
+    assert scene["sets"][0]["support"] == 2
 
 
-def test_memory_hook_budget_and_keys(tmp_path):
-    cfg = _cfg(tmp_path)
-    store = MemoryStore(cfg.memory_path)
-    battle = _battle(foe=[SimpleNamespace(
-        species="torterra", revealed_moves=[], known_ability=None, item=None,
-        types=["GRASS"],
-    )])
-    opp = opponent_key(["torterra"])
-    ours = our_team_key(cfg, ["incineroar"])
-    store.append("species", "torterra", "slow wall, fake out weakness", battle="b1")
-    store.append("species", "torterra", "second older note", battle="b0")
-    store.append("teams", opp, "their roster lost to our fire core", battle="b1")
-    store.append("teams", ours, "keep incineroar healthy", battle="b1")
-    store.append("species", "unrelated", "not this matchup", battle="b1")
-
-    hook = MemoryHook(cfg, store=store)
-    frag = asyncio.run(hook.run(SimpleNamespace(battle=battle)))
-    assert frag is not None
-    lines = frag.splitlines()
-    assert 1 <= len(lines) <= cfg.memory_hook_max_lines
-    assert len(frag) <= cfg.memory_hook_chars
-    assert "torterra" in frag and "incineroar" in frag
-    assert "unrelated" not in frag
+# --- recall -----------------------------------------------------------------
 
 
-def test_memory_hook_empty_and_disabled(tmp_path):
-    cfg = _cfg(tmp_path)
-    battle = _battle()
-    assert asyncio.run(MemoryHook(cfg).run(SimpleNamespace(battle=battle))) is None
-    disabled = _cfg(tmp_path, enable_memory=False)
-    store = MemoryStore(disabled.memory_path)
-    store.append("species", "torterra", "row", battle="b1")
-    assert asyncio.run(
-        MemoryHook(disabled, store=store).run(SimpleNamespace(battle=battle))
-    ) is None
+def _battle_for_recall():
+    foes = [
+        SimpleNamespace(
+            species="incineroar",
+            moves={"fakeout": None, "partingshot": None},
+            item="safetygoggles",
+            ability="intimidate",
+            tera_type=None,
+        )
+    ]
+    ours = [SimpleNamespace(species="rillaboom"), SimpleNamespace(species="incineroar")]
+    return SimpleNamespace(
+        battle_tag="battle-recall-1",
+        format=_FORMAT,
+        player_username="PokeAgent",
+        opponent_username="Opponent",
+        team={str(i): p for i, p in enumerate(ours)},
+        opponent_team={"0": foes[0]},
+        turn=1,
+    )
 
 
-# --- memory tools -----------------------------------------------------------
+@needs_bundle
+def test_recall_index_budget_and_turn_delta(tmp_path):
+    config = _cfg(tmp_path, team="Champions A")
+    profile = _profile(config)
+    kb = _kb(config)
+    battle = _battle_for_recall()
+    cm = ContextManager(
+        battle_tag=battle.battle_tag,
+        config=config,
+        kb=kb,
+        label="PokeAgent",
+        profile=profile,
+    )
+    index = recall.build_index(battle, cm, config, profile=profile)
+    assert index
+    assert "[MEMORY INDEX" in index
+    assert "incineroar" in index
+    assert len(index) <= config.memory_index_chars_preview + 40
+    assert "memory_grep" in (cm.system_prompt or "")
+
+    # no new reveal -> no per-turn block
+    assert recall.recall_turn(battle, cm, config) is None
+    # a new move reveals a delta
+    battle.opponent_team["0"].moves["knockoff"] = None
+    delta = recall.recall_turn(battle, cm, config)
+    assert delta is None or "[MEMORY RECALL" in delta
 
 
-def test_memory_search_and_stats_tools(tmp_path):
-    cfg = _cfg(tmp_path)
-    store = MemoryStore(cfg.memory_path)
-    store.append("species", "torterra", "slow wall", battle="b1", date="2026-01-01")
-    store.append("tactics", "perish_trap", "perish trap closed us out", battle="b2")
-    ctx = ToolContext(battle=_battle(), config=cfg)
+@needs_bundle
+def test_assemble_prompt_carries_index_in_system(tmp_path):
+    from helpers import make_double_battle, make_kb
 
-    out = asyncio.run(MemorySearchTool().execute(ctx, query="perish"))
-    assert "perish_trap" in out and "1 match" in out
-    out = asyncio.run(MemorySearchTool().execute(ctx, query="torterra", level="species"))
-    assert "slow wall" in out
-    out = asyncio.run(MemorySearchTool().execute(ctx, query="no-such-thing"))
-    assert out.startswith("no memory rows")
-    with pytest.raises(ToolError):
-        asyncio.run(MemorySearchTool().execute(ctx, query="(", regex=True))
+    battle = make_double_battle()
+    kb = make_kb()
+    config = _cfg(tmp_path, battle_format=battle.format)
+    profile = profile_for(battle.format)
+    cm = ContextManager(
+        battle_tag=battle.battle_tag,
+        config=config,
+        kb=kb,
+        label="PokeAgent",
+        profile=profile,
+    )
+    recall.build_index(battle, cm, config, profile=profile)
+    system, messages = cm.assemble_prompt(battle, [])
+    assert "[MEMORY INDEX" in system
+    assert "memory_grep" in system
+    assert messages
 
-    stats = asyncio.run(MemoryStatsTool().execute(ctx))
-    assert "total rows: 2" in stats and "species" in stats
-    assert asyncio.run(MemoryStatsTool().execute(
-        ToolContext(battle=_battle(), config=_cfg(tmp_path, memory_dir=tmp_path / "empty"))
-    )).startswith("memory is empty")
+
+@needs_bundle
+def test_recall_isolates_scopes(tmp_path):
+    config = _cfg(tmp_path)
+    profile = _profile(config)
+    kb = _kb(config)
+    current = memory_scope.scope_from(profile, _FORMAT)
+    root = memory_scope.ensure_scope_root(config, current, _FORMAT)
+    # put a fact under the standard ruleset instead
+    standard = memory_scope.scope_from(profile_for("gen9vgc2025regihidden"), "gen9vgc2025regihidden")
+    other_root = memory_scope.ensure_scope_root(config, standard, "gen9vgc2025regihidden")
+    (other_root / "facts" / "species").mkdir(parents=True, exist_ok=True)
+    row = _fact(content="should not leak")
+    (other_root / "facts" / "species" / "incineroar.ndjson").write_text(
+        schema.format_fact_line(row) + "\n", encoding="utf-8"
+    )
+    rows = memory_facts.read_facts_for_keys([root], ["incineroar"])
+    assert not rows
+
+
+# --- tools ------------------------------------------------------------------
+
+
+@needs_bundle
+def test_memory_tools_grep_read_stats_and_budget(tmp_path):
+    config = _cfg(tmp_path, team="Champions A", memory_tool_calls_per_turn=3)
+    profile = _profile(config)
+    kb = _kb(config)
+    battle = _battle_for_recall()
+    cm = ContextManager(
+        battle_tag=battle.battle_tag,
+        config=config,
+        kb=kb,
+        label="PokeAgent",
+        profile=profile,
+    )
+    recall.build_index(battle, cm, config, profile=profile)
+    ctx = ToolContext(battle=battle, kb=kb, context=cm, config=config)
+
+    async def scenario():
+        out = await MemoryGrepTool().execute(ctx, subject="incineroar")
+        assert "incineroar" in out
+        read = await MemoryReadTool().execute(ctx, key="incineroar")
+        assert "summary" in read and "PRIOR" in read
+        cm.begin_turn()
+        team_out = await MemoryGrepTool().execute(ctx, subject="team-champions-a")
+        assert "team-champions-a" in team_out
+        arch_out = await MemoryGrepTool().execute(ctx, archetype="trick_room")
+        assert "trick_room" in arch_out
+        cm.begin_turn()
+        stats = await MemoryStatsTool().execute(ctx)
+        assert "scenes:" in stats
+        await MemoryGrepTool().execute(ctx, query="x")
+        await MemoryGrepTool().execute(ctx, query="y")
+        with pytest.raises(ToolError):
+            await MemoryGrepTool().execute(ctx, query="z")
+
+    asyncio.run(scenario())
 
 
 def test_memory_tools_disabled(tmp_path):
-    ctx = ToolContext(battle=_battle(), config=_cfg(tmp_path, enable_memory=False))
-    with pytest.raises(ToolError):
-        asyncio.run(MemorySearchTool().execute(ctx, query="x"))
-    with pytest.raises(ToolError):
-        asyncio.run(MemoryStatsTool().execute(ctx))
+    config = _cfg(tmp_path, enable_memory=False)
+    ctx = ToolContext(battle=_battle_for_recall(), config=config)
+
+    async def scenario():
+        with pytest.raises(ToolError):
+            await MemoryGrepTool().execute(ctx, query="x")
+
+    asyncio.run(scenario())
 
 
-# --- in-battle grep (battle_history) ---------------------------------------
+# --- index ------------------------------------------------------------------
 
 
-def _cm(tmp_path):
-    return ContextManager(battle_tag="battle-1", config=_cfg(tmp_path))
-
-
-def test_battle_history_grep_scopes_and_limit(tmp_path):
-    cm = _cm(tmp_path)
-    cm.records.append(
-        TurnRecord(
-            seq=1, turn=1, request="",
-            events=["move p1a fakeout"],
-            decision="move:fakeout", reason="pressure the torterra",
-            cot="I think torterra will protect; fake out anyway",
-        )
-    )
-    cm.records.append(
-        TurnRecord(
-            seq=2, turn=2, request="",
-            decision="move:flamethrower", reason="burn the wall",
-        )
-    )
-    cm.ledger.add_note(
-        ReasoningNote(seq=1, turn=1, intent="fake out the torterra lead",
-                      claims=["torterra is slow"])
-    )
-    cm.ledger.claims.append(
-        Claim(subject="torterra", kind="speed",
-              text="torterra under 100 speed", turn=1)
-    )
-    tool = BattleHistoryTool()
-    ctx = ToolContext(battle=make_battle(), context=cm, config=cm.config)
-
-    out = asyncio.run(tool.execute(ctx, pattern="torterra", limit=2))
-    assert "#1 T1" in out and "[reason]" in out
-    assert "showing 2" in out
-
-    out = asyncio.run(tool.execute(ctx, pattern="torterra", scope="claims"))
-    assert "#- T1 [claims]" in out and "under 100 speed" in out
-    assert "[cot]" not in out
-
-    out = asyncio.run(tool.execute(ctx, pattern="fake out torterra", scope="notes"))
-    assert "[notes]" in out
-
-    out = asyncio.run(tool.execute(ctx, pattern="torterra", turn=2))
-    assert out.startswith("no match")
-
-    with pytest.raises(ToolError):
-        asyncio.run(tool.execute(ctx, pattern="x", scope="nope"))
-    with pytest.raises(ToolError):
-        asyncio.run(tool.execute(ctx, pattern="(", regex=True))
-
-
-def test_battle_history_without_pattern_unchanged(tmp_path):
-    cm = _cm(tmp_path)
-    cm.records.append(
-        TurnRecord(seq=1, turn=1, request="", decision="move:fakeout", reason="chip")
-    )
-    tool = BattleHistoryTool()
-    ctx = ToolContext(battle=make_battle(), context=cm, config=cm.config)
-    assert asyncio.run(tool.execute(ctx)) == "turn 1: move:fakeout — chip"
+@needs_bundle
+def test_scene_index_rebuild(tmp_path):
+    config = _cfg(tmp_path)
+    profile = _profile(config)
+    kb = _kb(config)
+    scope = memory_scope.scope_for_config(config)
+    root = memory_scope.ensure_scope_root(config, scope, _FORMAT)
+    seed.seed_scope(root, scope, kb, profile, config)
+    index = scenes.rebuild_index(root)
+    keys = {entry["key"] for entry in index["entries"]}
+    assert "rain" in keys
+    assert (root / "scene_index.json").is_file()

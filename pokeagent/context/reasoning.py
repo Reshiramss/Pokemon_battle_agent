@@ -99,7 +99,7 @@ class LLMNoteExtractor:
         self,
         provider: "LLMProvider",
         *,
-        max_tokens: int = 350,
+        max_tokens: int = 1500,  # hidden thinking is spent from this budget first
         input_chars: int = 6000,
     ):
         self.provider = provider
@@ -149,8 +149,11 @@ class LLMNoteExtractor:
             lines.append(f"NOTE: the decision loop failed ({record.fallback_reason})")
         if record.reason:
             lines.append(f"Reason given: {record.reason}")
-        if record.cot:
-            lines.append("Reasoning:\n" + record.cot[: self.input_chars])
+        # hidden thinking is the real reasoning on a reasoning model; the
+        # visible text is often empty, which starved every note
+        reasoning = record.thinking or record.cot
+        if reasoning:
+            lines.append("Reasoning:\n" + reasoning[: self.input_chars])
         if record.events:
             events = "; ".join(record.events[:12])
             lines.append(f"Events after the decision: {events}")
